@@ -1,0 +1,17 @@
+{
+  "name": "@fiora/runtime-endurance",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@fiora/shared-types": "*",
+    "@fiora/runtime-telemetry": "*",
+    "@fiora/recovery-orchestration": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2"
+  }
+}

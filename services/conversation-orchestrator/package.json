@@ -1,0 +1,22 @@
+{
+  "name": "@fiora/conversation-orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "ts-node src/server.ts"
+  },
+  "dependencies": {
+    "@fiora/shared-types": "*",
+    "@fiora/conversation-ingress": "*",
+    "@fiora/conversation-routing": "*",
+    "@fiora/conversation-governance": "*",
+    "@fiora/human-handoff": "*",
+    "@fiora/conversation-memory": "*",
+    "fastify": "^4.26.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2"
+  }
+}

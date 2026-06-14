@@ -1,0 +1,16 @@
+{
+  "name": "@fiora/runtime-load-testing",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@fiora/shared-types": "*",
+    "@fiora/runtime-telemetry": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2"
+  }
+}

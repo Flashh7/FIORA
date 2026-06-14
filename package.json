@@ -1,0 +1,36 @@
+{
+  "name": "fiora-os",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@10.8.2",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "build": "turbo run build --filter=dashboard --filter=gateway --filter=@fiora/agent-support --filter=@fiora/agent-marketing --filter=@fiora/agent-voice",
+    "dev": "concurrently -n gateway,support,marketing,voice,dashboard -c blue,green,yellow,cyan,magenta \"npm --prefix apps/gateway run dev\" \"npm --prefix services/agent-support run dev\" \"npm --prefix services/agent-marketing run dev\" \"npm --prefix services/agent-voice run dev\" \"npm --prefix apps/dashboard run dev\"",
+    "lint": "turbo run lint",
+    "test": "turbo run test"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node-fetch": "^2.6.13",
+    "bcryptjs": "^3.0.3",
+    "concurrently": "^9.2.1",
+    "eslint": "^8.57.0",
+    "node-fetch": "^2.7.0",
+    "prettier": "^3.2.5",
+    "tsx": "^4.22.4",
+    "turbo": "latest",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "prisma": "^5.22.0"
+  }
+}

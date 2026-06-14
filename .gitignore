@@ -1,0 +1,12 @@
+node_modules/
+dist/
+build/
+.env
+*.log
+*.sqlite
+.turbo/
+.opencode/
+scratch.js
+run-proof*.js
+run-proof*.ts
+test-*.js

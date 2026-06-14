@@ -1,0 +1,37 @@
+{
+  "name": "@fiora/agent-voice",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^8.3.1",
+    "@fiora/agent-runtime-core": "*",
+    "@fiora/logger": "*",
+    "@fiora/shared-memory-bus": "*",
+    "@fiora/shared-types": "*",
+    "@fiora/agents": "*",
+    "@fiora/tools": "*",
+    "@fiora/runtime": "*",
+    "@prisma/client": "^5.22.0",
+    "alawmulaw": "^6.0.0",
+    "axios": "^1.17.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^4.26.2",
+    "form-data": "^4.0.6",
+    "ioredis": "^5.3.2",
+    "msedge-tts": "^2.0.5",
+    "openai": "^6.42.0",
+    "wavefile": "^11.0.0",
+    "ws": "^8.21.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "tsx": "^4.22.4",
+    "typescript": "^5.4.0"
+  }
+}

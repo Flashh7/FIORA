@@ -1,0 +1,586 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ExecutionMode {
+  SIMULATION
+  STAGING
+  PRODUCTION
+}
+
+enum OperatorRole {
+  ADMIN
+  SUPPORT_OPERATOR
+  VIEWER
+}
+
+model Tenant {
+  id                     String       @id @default(uuid())
+  name                   String
+  max_daily_budget_cents Int          @default(100000) // Default $1000.00
+  created_at             DateTime     @default(now())
+  updated_at             DateTime     @updatedAt
+
+  operators       Operator[]
+  event_ledger    EventLedger[]
+  executions      Execution[]
+  escalations     Escalation[]
+  integrations    OAuthIntegration[]
+  webhooks        WebhookEvent[]
+  mutation_logs   MutationAuditLog[]
+  appointments    Appointment[]
+  voice_sessions  VoiceSession[]
+}
+
+model Operator {
+  id            String       @id @default(uuid())
+  tenant_id     String
+  email         String       @unique
+  password_hash String
+  name          String
+  role          OperatorRole @default(VIEWER)
+  is_active     Boolean      @default(true)
+  created_at    DateTime     @default(now())
+  updated_at    DateTime     @updatedAt
+
+  tenant        Tenant       @relation(fields: [tenant_id], references: [id])
+  resolved_escalations Escalation[] @relation("EscalationResolver")
+}
+
+enum ExecutionStatus {
+  RUNNING
+  FAILED
+  COMPLETED
+  ESCALATED
+  RETRYING
+  CANCELLED
+}
+
+enum EscalationStatus {
+  PENDING
+  RESOLVED
+  REJECTED
+}
+
+// Immutable Ledger of all system events
+model EventLedger {
+  id                  String        @id @default(uuid())
+  tenant_id           String
+  execution_id        String
+  correlation_id      String
+  parent_execution_id String?
+  sequence_number     Int
+  execution_mode      ExecutionMode
+  event_type          String
+  source_service      String
+  payload             Json          // The complete snapshot
+  emitted_at          DateTime      @default(now())
+
+  tenant              Tenant        @relation(fields: [tenant_id], references: [id])
+
+  @@index([tenant_id])
+  @@index([execution_id])
+  @@index([correlation_id])
+  @@index([event_type])
+}
+
+// Execution state tracking
+model Execution {
+  id             String          @id @default(uuid())
+  tenant_id      String
+  execution_id   String          @unique
+  correlation_id String
+  workflow_name  String
+  mode           ExecutionMode
+  status         ExecutionStatus
+  started_at     DateTime        @default(now())
+  updated_at     DateTime        @updatedAt
+  retry_count    Int             @default(0)
+  
+  tenant         Tenant          @relation(fields: [tenant_id], references: [id])
+  escalations    Escalation[]
+}
+
+// Dead Letter Queue for failure handling
+model DeadLetterQueue {
+  id             String        @id @default(uuid())
+  execution_id   String
+  correlation_id String
+  failed_service String
+  error_reason   String
+  payload        Json
+  created_at     DateTime      @default(now())
+}
+
+// Escalation resolutions
+enum EscalationResolution {
+  APPROVE
+  REJECT
+  MODIFY
+  REPLAY
+}
+
+// Escalations requiring human intervention
+model Escalation {
+  id                    String                @id @default(uuid())
+  tenant_id             String
+  execution_id          String
+  correlation_id        String
+  agent_name            String
+  reason                String
+  generation_confidence Float?
+  format_confidence     Float?
+  policy_confidence     Float?
+  final_confidence      Float
+  context_snapshot      Json
+  status                EscalationStatus      @default(PENDING)
+  resolution_type       EscalationResolution?
+  resolved_by_id        String?
+  created_at            DateTime              @default(now())
+  resolved_at           DateTime?
+  
+  tenant                Tenant                @relation(fields: [tenant_id], references: [id])
+  execution             Execution             @relation(fields: [execution_id], references: [execution_id])
+  resolved_by           Operator?             @relation("EscalationResolver", fields: [resolved_by_id], references: [id])
+}
+
+enum IntegrationProvider {
+  META_ADS
+  GOOGLE_ADS
+  HUBSPOT
+  SALESFORCE
+}
+
+model OAuthIntegration {
+  id                  String              @id @default(uuid())
+  tenant_id           String
+  provider            IntegrationProvider
+  access_token        String
+  refresh_token       String?
+  token_expires_at    DateTime?
+  external_account_id String?             // e.g. Meta Ad Account ID
+  status              String              @default("ACTIVE")
+  created_at          DateTime            @default(now())
+  updated_at          DateTime            @updatedAt
+
+  tenant              Tenant              @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, provider])
+}
+
+model WebhookEvent {
+  id                  String              @id @default(uuid())
+  tenant_id           String
+  provider            IntegrationProvider
+  event_type          String
+  payload             Json
+  status              String              @default("PENDING") // PENDING, PROCESSED, FAILED
+  created_at          DateTime            @default(now())
+  processed_at        DateTime?
+
+  tenant              Tenant              @relation(fields: [tenant_id], references: [id])
+}
+
+// Phase 1 (Safety): Mutation Audit Log
+model MutationAuditLog {
+  id                  String              @id @default(uuid())
+  tenant_id           String
+  execution_id        String
+  correlation_id      String
+  idempotency_key     String              @unique
+  provider            IntegrationProvider
+  mutation_type       String              // e.g. BUDGET_INCREASE
+  target_resource_id  String              // e.g. Campaign ID
+  pre_mutation_state  Json?
+  post_mutation_state Json?
+  delta               Json?
+  status              String              // e.g. SUCCESS, FAILED, ROLLED_BACK
+  error_message       String?
+  created_at          DateTime            @default(now())
+  
+  tenant              Tenant              @relation(fields: [tenant_id], references: [id])
+  
+  @@index([tenant_id])
+  @@index([execution_id])
+}
+
+// Drift Analysis Reports
+model DriftReport {
+  id                        String   @id @default(uuid())
+  original_execution_id     String
+  replay_execution_id       String
+  generation_drift_score    Float
+  confidence_drift_delta    Float
+  latency_regression_ms     Int
+  structural_drift_detected Boolean
+  orchestration_path_drift  Boolean
+  created_at                DateTime @default(now())
+
+  @@index([original_execution_id])
+  @@index([replay_execution_id])
+}
+
+// Severity Classification
+enum ReliabilitySeverity {
+  INFO
+  WARNING
+  CRITICAL
+  FATAL
+}
+
+// Phase 5: Determinism Certification
+model DeterminismCertification {
+  id                     String              @id @default(uuid())
+  execution_id           String              @unique
+  determinism_certified  Boolean
+  certification_score    Float
+  drift_detected         Boolean
+  certification_failures String[]
+  severity               ReliabilitySeverity @default(INFO)
+  created_at             DateTime            @default(now())
+}
+
+// Phase 5: Orchestration Graph DAG
+model OrchestrationGraphSnapshot {
+  id             String   @id @default(uuid())
+  execution_id   String   @unique
+  correlation_id String
+  nodes          Json     // Array of nodes
+  edges          Json     // Array of edges
+  created_at     DateTime @default(now())
+
+  @@index([correlation_id])
+}
+
+// Phase 7: Backpressure Policy
+enum BackpressurePolicy {
+  NORMAL
+  THROTTLE_REPLAYS
+  FREEZE_LOW_PRIORITY_WORKFLOWS
+  ESCALATION_ONLY_MODE
+  REJECT_NONCRITICAL_EXECUTIONS
+}
+
+// Phase 7: Runtime Stability
+enum RuntimeStabilityState {
+  STABLE
+  DEGRADED
+  UNSTABLE
+  RECOVERING
+  SATURATED
+}
+
+// Phase 7: Runtime Telemetry
+model RuntimeTelemetry {
+  id                    String                @id @default(uuid())
+  timestamp             DateTime              @default(now())
+  time_window_mins      Int                   // e.g. 5, 15, 60, 1440
+  stability_state       RuntimeStabilityState @default(STABLE)
+  active_backpressure   BackpressurePolicy    @default(NORMAL)
+  queue_latency_ms      Int
+  replay_throughput_sec Float
+  escalation_count      Int
+  retry_storm_count     Int
+  clock_skew_detected   Boolean
+  
+  @@index([timestamp])
+}
+
+// Phase 7: Extended Determinism Certification
+model EventOrderingCertification {
+  id                        String   @id @default(uuid())
+  execution_id              String   @unique
+  ordering_certified        Boolean
+  ordering_violation_count  Int      @default(0)
+  sequence_gap_detected     Boolean
+  event_received_at         DateTime
+  event_processed_at        DateTime
+  processing_duration_ms    Int
+  clock_skew_detected       Boolean
+  created_at                DateTime @default(now())
+}
+
+// Phase 8: Recovery Certification
+model RecoveryCertification {
+  id                        String   @id @default(uuid())
+  execution_id              String   @unique
+  recovery_certified        Boolean
+  recovery_hash             String
+  recovery_drift_detected   Boolean
+  recovery_integrity_score  Float
+  created_at                DateTime @default(now())
+}
+
+// Phase 8: Replay Debt & Entropy Tracking
+model OperationalEntropySnapshot {
+  id                           String   @id @default(uuid())
+  timestamp                    DateTime @default(now())
+  replay_debt_score            Float
+  replay_starvation_risk       String   // e.g. LOW, HIGH
+  replay_recovery_eta_mins     Int
+  replay_backlog_growth_rate   Float
+  entropy_budget               Float    @default(100.0)
+  entropy_accumulation_rate    Float
+  runtime_entropy_score        Float
+  entropy_recovery_rate        Float
+  approval_pressure_index      Float
+  
+  @@index([timestamp])
+}
+
+// Phase 9: CRM Intelligence Layer
+model CRMLead {
+  id                   String        @id @default(uuid())
+  lead_source          String
+  company_metadata     Json
+  contact_metadata     Json
+  qualification_score  Float?
+  opportunity_tier     String?       // e.g. TIER_1, TIER_2
+  trust_state          String        @default("UNKNOWN") // e.g. VERIFIED, RISKY
+  escalation_history   Json          @default("[]")
+  created_at           DateTime      @default(now())
+  updated_at           DateTime      @updatedAt
+
+  opportunities        CRMOpportunity[]
+  outreach_campaigns   OutreachCampaign[]
+}
+
+model CRMOpportunity {
+  id                   String        @id @default(uuid())
+  lead_id              String
+  execution_id         String        @unique
+  correlation_id       String
+  opportunity_state    String        // e.g. NEW, QUALIFIED, OUTREACH_PENDING, CLOSED
+  state_history        Json          // Track transitions and lineage
+  replay_hash          String?
+  created_at           DateTime      @default(now())
+  updated_at           DateTime      @updatedAt
+
+  lead                 CRMLead       @relation(fields: [lead_id], references: [id])
+}
+
+// Phase 9: Outreach Governance
+model OutreachCampaign {
+  id                   String        @id @default(uuid())
+  lead_id              String
+  execution_id         String        @unique
+  campaign_status      String        // PENDING_APPROVAL, APPROVED, REJECTED, SENT, THROTTLED
+  structured_payload   Json
+  escalation_reason    String?
+  outbound_throttled   Boolean       @default(false)
+  sent_at              DateTime?
+  created_at           DateTime      @default(now())
+
+  lead                 CRMLead       @relation(fields: [lead_id], references: [id])
+}
+
+// Phase 11: Conversational Orchestration & Memory
+model ConversationSession {
+  id                    String              @id @default(uuid())
+  customer_id           String?
+  execution_id          String              @unique
+  channel_type          String              // e.g. VOICE, WEB_CHAT, WHATSAPP
+  status                String              // e.g. ACTIVE, ESCALATED, RESOLVED
+  sentiment_trajectory  Json                // Array of emotional states
+  escalation_reason     String?
+  trust_state           String              @default("UNKNOWN")
+  replay_hash           String?
+  created_at            DateTime            @default(now())
+  updated_at            DateTime            @updatedAt
+
+  turns                 ConversationTurn[]
+}
+
+model ConversationTurn {
+  id                    String              @id @default(uuid())
+  session_id            String
+  execution_id          String
+  speaker               String              // CUSTOMER, ORCHESTRATOR, HUMAN
+  raw_content           String
+  structured_intent     Json?
+  sentiment_score       Float
+  emotional_risk        String              // e.g. LOW, HIGH, DISTRESSED
+  governance_flags      Json?               // Hallucination risks, promise blocks
+  created_at            DateTime            @default(now())
+
+  session               ConversationSession @relation(fields: [session_id], references: [id])
+}
+
+// Phase 12 & Phase 2: Autonomous Voice / Calling Agent
+model VoiceSession {
+  id                    String              @id @default(uuid())
+  tenant_id             String
+  conversation_id       String              @unique
+  caller_number         String?
+  direction             String              @default("INBOUND") // INBOUND or OUTBOUND
+  transport_protocol    String              // e.g. WebRTC, SIP
+  active                Boolean             @default(true)
+  barge_in_count        Int                 @default(0)
+  operator_takeover     Boolean             @default(false)
+  escalation_status     String              @default("NONE") // NONE, PENDING, RESOLVED
+  sentiment_score       Float               @default(0.0)
+  end_to_end_latency_ms Int                 @default(0)
+  packet_loss_rate      Float               @default(0.0)
+  started_at            DateTime            @default(now())
+  ended_at              DateTime?
+  created_at            DateTime            @default(now())
+  updated_at            DateTime            @updatedAt
+
+  tenant                Tenant              @relation(fields: [tenant_id], references: [id])
+  latency_metrics       VoiceLatencyMetric[]
+  transcripts           CallTranscript[]
+  actions               CallAction[]
+  appointments          Appointment[]
+  lead_qualifications   LeadQualification[]
+}
+
+model CallTranscript {
+  id               String       @id @default(uuid())
+  voice_session_id String
+  speaker          String       // AI or HUMAN
+  text             String
+  timestamp        DateTime     @default(now())
+
+  session          VoiceSession @relation(fields: [voice_session_id], references: [id])
+}
+
+model CallAction {
+  id               String       @id @default(uuid())
+  voice_session_id String
+  action_type      String       // ESCALATION, CRM_UPDATE, APPOINTMENT
+  payload          Json
+  status           String       @default("COMPLETED")
+  created_at       DateTime     @default(now())
+
+  session          VoiceSession @relation(fields: [voice_session_id], references: [id])
+}
+
+model Appointment {
+  id               String       @id @default(uuid())
+  tenant_id        String
+  voice_session_id String?
+  start_time       DateTime
+  end_time         DateTime
+  status           String       @default("SCHEDULED")
+  payload          Json
+  created_at       DateTime     @default(now())
+
+  tenant           Tenant       @relation(fields: [tenant_id], references: [id])
+  session          VoiceSession? @relation(fields: [voice_session_id], references: [id])
+}
+
+model LeadQualification {
+  id               String       @id @default(uuid())
+  voice_session_id String
+  lead_id          String?
+  score            Float
+  status           String       @default("QUALIFIED")
+  created_at       DateTime     @default(now())
+
+  session          VoiceSession @relation(fields: [voice_session_id], references: [id])
+}
+
+model VoiceLatencyMetric {
+  id                    String              @id @default(uuid())
+  voice_session_id      String
+  timestamp             DateTime            @default(now())
+  transcript_delay_ms   Int
+  tts_generation_delay  Int
+  orchestration_delay_ms Int
+  total_latency_ms      Int
+  escalation_triggered  Boolean             @default(false)
+
+  session               VoiceSession        @relation(fields: [voice_session_id], references: [id])
+}
+
+// Phase 13: Operational Shared Memory & Data Bus
+model OperationalSharedMemory {
+  id                    String              @id @default(uuid())
+  entity_id             String              @unique // e.g. customer_id, company_id
+  entity_type           String              // CUSTOMER, ORGANIZATION, CAMPAIGN
+  aggregated_context    Json                // Unified cross-department knowledge
+  trust_score           Float               @default(1.0)
+  escalation_risk       String              @default("LOW")
+  last_updated_by       String              // Which agent updated this last
+  created_at            DateTime            @default(now())
+  updated_at            DateTime            @updatedAt
+}
+
+model CrossAgentSignal {
+  id                    String              @id @default(uuid())
+  source_agent          String              // e.g. MARKETING_AGENT
+  target_agent          String              // e.g. SALES_AGENT, BROADCAST
+  signal_type           String              // e.g. BUYING_SIGNAL, CHURN_RISK
+  payload               Json                // The signal data
+  priority              String              // LOW, MEDIUM, HIGH, URGENT
+  status                String              @default("UNPROCESSED") // UNPROCESSED, PROCESSED, ESCALATED
+  created_at            DateTime            @default(now())
+  processed_at          DateTime?
+
+  @@index([target_agent, status])
+}
+
+model StrategicBriefing {
+  id                    String              @id @default(uuid())
+  briefing_type         String              // WEEKLY_CEO_BRIEF, URGENT_ALERT
+  insights              Json                // Array of key insights
+  anomalies_detected    Json                // Array of operational anomalies
+  recommendations       Json                // Array of strategic recommendations
+  confidence_score      Float
+  created_at            DateTime            @default(now())
+}
+
+// Phase 15: Temporal Intelligence & Organizational Learning
+model TemporalTrend {
+  id                    String              @id @default(uuid())
+  entity_type           String              // e.g. CAMPAIGN, CUSTOMER, AGENT_WORKFORCE
+  entity_id             String
+  trend_metric          String              // e.g. CAC_INFLATION, CHURN_RISK
+  trajectory_30d        Json                // Array of data points
+  forecast_90d          Json
+  confidence_score      Float
+  created_at            DateTime            @default(now())
+}
+
+model OrganizationalLearningPolicy {
+  id                    String              @id @default(uuid())
+  detected_pattern      String
+  root_cause            String
+  proposed_override     Json
+  status                String              @default("PENDING_HUMAN_APPROVAL") // APPROVED, REJECTED
+  created_at            DateTime            @default(now())
+}
+
+// Phase 16: Organizational Cognition & Forecast Governance
+model StrategicForecast {
+  id                    String              @id @default(uuid())
+  prediction            String
+  confidence_range      String
+  evidence_sources      Json
+  historical_accuracy_score Float
+  uncertainty_level     String
+  volatility_factors    Json
+  created_at            DateTime            @default(now())
+}
+
+model OrganizationalDrift {
+  id                    String              @id @default(uuid())
+  drift_signal          String
+  severity              String
+  affected_departments  Json
+  detected_at           DateTime            @default(now())
+}
+
+model WorkforceFatigue {
+  id                    String              @id @default(uuid())
+  operator_id           String
+  burnout_risk_score    Float
+  escalation_density    Int
+  intervention_fatigue  Float
+  recorded_at           DateTime            @default(now())
+}
