@@ -88,6 +88,22 @@ server.register(fastifyHttpProxy, {
 });
 
 // Standardized ingestion endpoint for incoming events/webhooks
+server.post('/outbound-twiml', async (request, reply) => {
+  logger.info("Received outbound TwiML request from Twilio");
+  
+  // INITIAL VERIFICATION STEP: Just say hello
+  // Full websocket integration will replace this after first test.
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="wss://video-tragedy-duly.ngrok-free.dev/api/voice/stream" />
+  </Connect>
+</Response>`;
+
+  reply.header('Content-Type', 'text/xml');
+  return reply.send(twiml);
+});
+
 server.post('/api/events/ingest', async (request, reply) => {
   const execution_id = randomUUID();
   const correlation_id = (request.headers['x-correlation-id'] as string) || randomUUID();
