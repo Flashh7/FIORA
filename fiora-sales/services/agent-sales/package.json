@@ -1,0 +1,24 @@
+{
+  "name": "@fiora/agent-sales",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@fiora/crm-intelligence": "*",
+    "@fiora/outreach-governance": "*",
+    "@fiora/shared-types": "*",
+    "express": "^5.2.1",
+    "fastify": "^4.26.2",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
+    "typescript": "^5.9.3"
+  }
+}

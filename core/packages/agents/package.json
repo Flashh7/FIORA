@@ -1,0 +1,12 @@
+{
+  "name": "@fiora/agents",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.ts",
+  "dependencies": {
+    "@fiora/finance-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

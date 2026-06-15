@@ -1,0 +1,19 @@
+{
+  "name": "@fiora/finance-agent",
+  "version": "1.0.0",
+  "description": "FIORA Finance Agent - Operational Finance Automation Layer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "googleapis": "^173.0.0",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  }
+}

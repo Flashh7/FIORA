@@ -7,13 +7,23 @@
     "node": ">=20.0.0"
   },
   "workspaces": [
-    "apps/*",
-    "packages/*",
-    "services/*"
+    "core/apps/*",
+    "core/packages/*",
+    "fiora-voice/apps/*",
+    "fiora-voice/services/*",
+    "fiora-voice/packages/*",
+    "fiora-finance/services/*",
+    "fiora-finance/packages/*",
+    "fiora-marketing/services/*",
+    "fiora-marketing/packages/*",
+    "fiora-sales/services/*",
+    "fiora-sales/packages/*",
+    "fiora-support/services/*",
+    "fiora-support/packages/*"
   ],
   "scripts": {
     "build": "turbo run build --filter=dashboard --filter=gateway --filter=@fiora/agent-support --filter=@fiora/agent-marketing --filter=@fiora/agent-voice",
-    "dev": "concurrently -n gateway,support,marketing,voice,dashboard -c blue,green,yellow,cyan,magenta \"npm --prefix apps/gateway run dev\" \"npm --prefix services/agent-support run dev\" \"npm --prefix services/agent-marketing run dev\" \"npm --prefix services/agent-voice run dev\" \"npm --prefix apps/dashboard run dev\"",
+    "dev": "concurrently -n gateway,support,marketing,voice,dashboard -c blue,green,yellow,cyan,magenta \"npm --prefix fiora-voice/apps/gateway run dev\" \"npm --prefix fiora-support/services/agent-support run dev\" \"npm --prefix fiora-marketing/services/agent-marketing run dev\" \"npm --prefix fiora-voice/services/agent-voice run dev\" \"npm --prefix core/apps/dashboard run dev\"",
     "lint": "turbo run lint",
     "test": "turbo run test"
   },
