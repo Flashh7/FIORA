@@ -8,6 +8,8 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@fastify/cors": "^8.2.0",
+    "@fastify/rate-limit": "^8.1.1",
     "@fiora/agent-runtime-core": "*",
     "@fiora/finance-agent": "*",
     "@fiora/shared-memory-bus": "*",

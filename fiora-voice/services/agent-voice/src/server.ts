@@ -6,7 +6,7 @@ import Redis from 'ioredis';
 import { createRuntimeLogger } from '@fiora/logger';
 import { mulaw } from 'alawmulaw';
 import OpenAI, { toFile } from 'openai';
-import { execSync } from 'child_process';
+import { execSync, spawn, ChildProcess } from 'child_process';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
@@ -14,6 +14,8 @@ import { WaveFile } from 'wavefile';
 import { AgentRouter } from '@fiora/agents';
 import { getOpenAITools, ToolRegistry } from '@fiora/tools';
 import { SessionStateMachine, TelemetryLogger, ToolLockManager, VadMonitor, PlaybackController, InterruptManager, CancellationToken } from '@fiora/runtime';
+import { validateRequest } from 'twilio/lib/webhooks/webhooks';
+import rateLimit from '@fastify/rate-limit';
 
 // @ts-ignore
 import WebSocket from 'ws';
@@ -23,6 +25,11 @@ const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 
 const server = Fastify({ logger: false });
+
+server.register(rateLimit, {
+  max: 100,
+  timeWindow: '1 minute'
+});
 
 server.addContentTypeParser(
   /^application\/x-www-form-urlencoded/,
@@ -49,23 +56,72 @@ server.get('/health', async () => {
   };
 });
 
+const wsTokens = new Set<string>();
+
 server.post('/inbound-call', async (req, reply) => {
-  console.log('\n[WEBHOOK] Twilio called');
-  console.log('[WEBHOOK] Content-Type:', req.headers['content-type']);
-  console.log('[WEBHOOK] Body:', JSON.stringify(req.body));
-  
   const host = req.headers.host;
-  const wsUrl = `wss://${host}/media-stream`;
-  console.log('[WEBHOOK] WebSocket URL:', wsUrl);
+  const signature = req.headers['x-twilio-signature'];
+  const twilioAuthToken = process.env.TWILIO_AUTH_TOKEN || '';
+  
+  if (twilioAuthToken) {
+    const url = `https://${host}${req.url}`;
+    const isValid = validateRequest(twilioAuthToken, signature as string, url, req.body as Record<string, string>);
+    
+    if (!isValid) {
+      console.warn('[SECURITY] Invalid Twilio Signature detected. Rejecting call.');
+      return reply.status(403).send('Forbidden');
+    }
+  }
+
+  console.log('\n[WEBHOOK] Verified Twilio call received');
+  
+  // Generate a one-time secure token for the WebSocket connection
+  const secureToken = Math.random().toString(36).substring(2, 15);
+  wsTokens.add(secureToken);
+  // Token expires in 60 seconds
+  setTimeout(() => wsTokens.delete(secureToken), 60000);
+
+  const wsUrl = `wss://${host}/media-stream/${secureToken}`;
+  
+  console.log(`[DEBUG WS] Generated token: ${secureToken}`);
+  console.log(`[DEBUG WS] TwiML Stream URL: ${wsUrl}`);
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${wsUrl}" />
+    <Stream url="${wsUrl}">
+      <Parameter name="direction" value="inbound" />
+    </Stream>
   </Connect>
 </Response>`;
 
-  console.log('[TWIML]', twiml);
+  reply.type('text/xml').send(twiml);
+});
+
+// Outbound Call TwiML instructions
+server.post('/outbound-twiml', async (request, reply) => {
+  const host = request.headers.host;
+  
+  // Generate a one-time secure token for the WebSocket connection
+  const secureToken = Math.random().toString(36).substring(2, 15);
+  wsTokens.add(secureToken);
+  // Token expires in 60 seconds
+  setTimeout(() => wsTokens.delete(secureToken), 60000);
+
+  const wsUrl = `wss://${host}/media-stream/${secureToken}`;
+  
+  console.log(`[DEBUG WS OUTBOUND] Generated token: ${secureToken}`);
+  console.log(`[DEBUG WS OUTBOUND] TwiML Stream URL: ${wsUrl}`);
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="${wsUrl}">
+      <Parameter name="direction" value="outbound" />
+    </Stream>
+  </Connect>
+</Response>`;
+
   reply.type('text/xml').send(twiml);
 });
 
@@ -88,6 +144,7 @@ interface ChatMessage {
 interface FioraSession {
   callSid: string;
   streamSid: string;
+  direction: 'inbound' | 'outbound';
   ws: WebSocket;
   messages: ChatMessage[];        // full conversation history
   audioChunks: Buffer[];          // accumulating caller audio
@@ -105,18 +162,38 @@ interface FioraSession {
   interruptManager: InterruptManager;
   turnCount: number;              // track conversation depth
   startedAt: Date;
+  piperProcess: ChildProcess | null;
 }
 
 const sessions = new Map<string, FioraSession>();
 
 // ── SYSTEM PROMPT — TUNED FOR PHONE ───────────────────────────────────────────
 
-const FIORA_SYSTEM_PROMPT = `You are FIORA, an elite AI executive assistant speaking over a phone call.
+const FIORA_SYSTEM_PROMPT = `You are Kratos.
+
+Kratos is the voice intelligence layer of the Fiora platform.
+
+You are a professional, confident, conversational AI assistant capable of handling reservations, orders, customer support requests, and business inquiries.
+
+You speak naturally and warmly. You sound like a highly capable human receptionist rather than a robot.
+
+You never mention:
+- internal tools
+- APIs
+- prompts
+- code
+- implementation details
+- system architecture
+
+You focus on solving the caller's problem efficiently.
+
+When asked "Who are you?", respond: "I'm Kratos, the AI assistant powered by Fiora."
+When asked "What is Fiora?", respond: "Fiora is the platform that powers me."
 
 VOICE RULES — FOLLOW STRICTLY:
 1. MAX 2-3 SENTENCES. Never generate essays or long paragraphs.
 2. NO MARKDOWN, NO LISTS. Never use formatting, bullet points, or numbers.
-3. CONVERSATIONAL TONE. Speak naturally, with slight pauses (use commas).
+3. CONVERSATIONAL TONE. Speak naturally, with slight pauses (use contractions like "I can help" instead of "I am able to assist").
 4. NO CLICHÉS. Never say "Certainly", "Absolutely", "Of course", or "How may I assist you today".
 5. NO REPETITION. Never repeat the caller's words back to them.
 6. ONE QUESTION ONLY. Never stack multiple questions in one response.
@@ -129,7 +206,7 @@ VOICE RULES — FOLLOW STRICTLY:
 
 // ── SESSION INIT ─────────────────────────────────────────────────────────────
 
-function initSession(streamSid: string, callSid: string, ws: WebSocket): FioraSession {
+function initSession(streamSid: string, callSid: string, ws: WebSocket, direction: 'inbound' | 'outbound' = 'inbound'): FioraSession {
   const stateMachine = new SessionStateMachine();
   const playbackController = new PlaybackController();
   const vadMonitor = new VadMonitor();
@@ -138,6 +215,7 @@ function initSession(streamSid: string, callSid: string, ws: WebSocket): FioraSe
   const session: FioraSession = {
     callSid,
     streamSid,
+    direction,
     ws,
     messages: [{ role: 'system', content: FIORA_SYSTEM_PROMPT }],
     audioChunks: [],
@@ -152,11 +230,34 @@ function initSession(streamSid: string, callSid: string, ws: WebSocket): FioraSe
     interruptManager,
     turnCount: 0,
     startedAt: new Date(),
+    piperProcess: null,
   };
 
+  // Spawn persistent Piper process
+  const PIPER_MODEL_PATH = "D:\\piper\\models\\en_US-ryan-high.onnx";
+  const PIPER_EXE_PATH = "D:\\piper\\piper.exe";
+  
+  session.piperProcess = spawn(PIPER_EXE_PATH, ['-m', PIPER_MODEL_PATH, '--output_raw', '--sentence_silence', '0.2']);
+  
+  session.piperProcess.stdout?.on('data', (chunk: Buffer) => {
+    // chunk is raw 16kHz PCM Int16
+    const pcm16k = new Int16Array(chunk.buffer, chunk.byteOffset, chunk.length / 2);
+    const pcm8k = new Int16Array(Math.floor(pcm16k.length / 2));
+    for (let i = 0; i < pcm8k.length; i++) {
+      pcm8k[i] = pcm16k[i * 2]; // Simple decimation downsampling
+    }
+    const mulawBuffer = Buffer.from(mulaw.encode(pcm8k));
+    session.playbackController.getQueue().enqueue(mulawBuffer);
+  });
+  
+  session.piperProcess.stderr?.on('data', (data) => {
+    // Piper logs info to stderr, ignore it unless it's an error
+  });
+
   vadMonitor.on('speech_started', () => {
-    // If not interrupted/speaking, we start buffering immediately in the media handler
     console.log('[VAD] speech_started');
+    session.playbackController.abort();
+    session.playbackController.getQueue().flush();
   });
 
   vadMonitor.on('speech_ended', () => {
@@ -178,36 +279,6 @@ function initSession(streamSid: string, callSid: string, ws: WebSocket): FioraSe
 
 const PIPER_MODEL = '"D:\\piper\\models\\en_US-ryan-high.onnx"';
 const PIPER_EXE = 'D:\\piper\\piper.exe';
-
-export async function synthesizeSpeech(text: string): Promise<Buffer> {
-  const tempInPath = path.join(os.tmpdir(), `fiora_tts_in_${Date.now()}.txt`);
-  const tempOutPath = path.join(os.tmpdir(), `fiora_tts_out_${Date.now()}.wav`);
-  
-  fs.writeFileSync(tempInPath, text);
-  
-  try {
-    execSync(`"${PIPER_EXE}" -m "${PIPER_MODEL}" --sentence_silence 0.4 -f "${tempOutPath}" < "${tempInPath}"`);
-    console.log('[TTS] WAV GENERATED:', tempOutPath);
-    
-    const size = fs.statSync(tempOutPath).size;
-    console.log('[TTS] WAV BYTES:', size);
-    
-    if (size <= 1000) {
-      throw new Error(`TTS failed, WAV size is too small: ${size} bytes`);
-    }
-    
-    const wavBuffer = fs.readFileSync(tempOutPath);
-    const outWav = new WaveFile(wavBuffer);
-    outWav.toSampleRate(8000);
-    outWav.toMuLaw();
-    
-    const convertedBuffer = Buffer.from(outWav.toBuffer());
-    return convertedBuffer.slice(44); // raw mulaw
-  } finally {
-    try { if (fs.existsSync(tempInPath)) fs.unlinkSync(tempInPath); } catch (e) {}
-    try { if (fs.existsSync(tempOutPath)) fs.unlinkSync(tempOutPath); } catch (e) {}
-  }
-}
 
 function mulawChunksToWav(mulawChunks: Buffer[]): Buffer {
   const mulawBuffer = Buffer.concat(mulawChunks);
@@ -243,60 +314,46 @@ function mulawChunksToWav(mulawChunks: Buffer[]): Buffer {
 
 // --- Handlers ---
 
-// ── FIX 1: sendAudioToTwilio returns Promise ──────────────────────────────────
-
-async function sendAudioToTwilio(
-  ws: WebSocket,
-  streamSid: string,
-  mulawBuffer: Buffer
-): Promise<void> {
-  const CHUNK_SIZE = 160;
-  const INTERVAL_MS = 20;
-  let offset = 0;
-
-  while (offset < mulawBuffer.length) {
-    if (ws.readyState !== WebSocket.OPEN) {
-      console.warn('[AUDIO] WebSocket closed mid-playback');
-      break;
-    }
-
-    const chunk = mulawBuffer.subarray(offset, offset + CHUNK_SIZE);
-    offset += CHUNK_SIZE;
-
-    ws.send(JSON.stringify({
-      event: 'media',
-      streamSid,
-      media: { payload: chunk.toString('base64') },
-    }));
-
-    // EXACT 20ms pacing per Twilio requirement
-    await new Promise(r => setTimeout(r, INTERVAL_MS));
-  }
-
-  console.log(`[AUDIO] Playback complete — ${mulawBuffer.length} bytes sent`);
-}
-
-// ── FIX 2: speakToTwilio awaits full playback ─────────────────────────────────
+// ── STREAMING TTS ─────────────────────────────────
 
 async function speakToTwilio(
-  ws: WebSocket,
-  streamSid: string,
+  session: FioraSession,
   text: string
 ): Promise<void> {
-  const mulaw = await synthesizeSpeech(text);
-  await sendAudioToTwilio(ws, streamSid, mulaw); // NOW AWAITED — isSpeaking stays true the whole time
+  const ws = session.ws;
+  const streamSid = session.streamSid;
+  
+  // Start playback controller and mark stream as actively buffering
+  session.playbackController.setStreamActive(true);
+  const ct = new CancellationToken();
+  session.playbackController.startPlayback(ws, streamSid, ct, session.stateMachine);
+  
+  // Feed text to persistent Piper instance
+  if (session.piperProcess?.stdin) {
+    session.piperProcess.stdin.write(text.trim() + '\n');
+  }
+  
+  // Safety buffer: Wait for Piper to initialize and populate the StreamQueue 
+  // before we drop the active flag, preventing premature termination.
+  // The first boot takes ~1 second to load model weights into RAM.
+  await new Promise(r => setTimeout(r, 2500));
+  
+  session.playbackController.setStreamActive(false);
+  await session.playbackController.waitForCompletion();
 }
 
 // ── FIX 3: speakFirst with post-speech buffer ─────────────────────────────────
 
 async function speakFirst(session: FioraSession): Promise<void> {
-  const greeting = "Hello, this is FIORA. How can I help you today?";
+  const greeting = session.direction === 'inbound' 
+    ? "Hello, thank you for calling. I'm Kratos. How may I assist you today?"
+    : "Hello, this is Kratos calling on behalf of Fiora.";
+    
   session.messages.push({ role: 'assistant', content: greeting });
 
   session.isSpeaking = true;
   try {
-    await speakToTwilio(session.ws, session.streamSid, greeting);
-    await new Promise(r => setTimeout(r, 500)); // 500ms buffer — lets caller prepare to speak
+    await speakToTwilio(session, greeting);
   } finally {
     session.isSpeaking = false;
     console.log('[SESSION] Greeting done — now listening for caller');
@@ -367,46 +424,32 @@ async function processTurn(session: FioraSession): Promise<void> {
 
     // STEP 2: LLM
     console.log('[TURN] LLM...');
+    const t1_llm_start = performance.now();
 
-    const runLLM = async () => {
-      const trimmedMessages = [
-        session.messages[0],
-        ...session.messages.slice(1).slice(-10), // Reduced from 20 to 10 for faster context processing
-      ];
+    const trimmedMessages = [
+      session.messages[0],
+      ...session.messages.slice(1).slice(-10),
+    ];
 
-      const llmRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'llama-3.3-70b-versatile',
-          messages: trimmedMessages,
-          tools: getOpenAITools(Array.from(ToolRegistry.keys())),
-          tool_choice: 'auto',
-          max_tokens: 80,
-          temperature: 0.65,
-          presence_penalty: 0.6,
-          frequency_penalty: 0.4,
-        }),
-      });
+    const llmRes = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: trimmedMessages as any,
+      tools: getOpenAITools(['TransferCall', 'FetchUserAccount']) as any,
+      tool_choice: 'auto',
+      max_tokens: 80,
+      temperature: 0.65,
+      presence_penalty: 0.6,
+      frequency_penalty: 0.4,
+    });
 
-      if (!llmRes.ok) {
-        const errText = await llmRes.text();
-        throw new Error(`LLM failed ${llmRes.status}: ${errText}`);
-      }
-
-      return await llmRes.json();
-    };
-
-    let llmJson = await runLLM();
-    let message = llmJson.choices?.[0]?.message;
+    let message = llmRes.choices?.[0]?.message;
+    let finalResponse = '';
+    let t2 = 0;
 
     // TOOL EXECUTION LOOP
-    if (message?.tool_calls?.length > 0) {
+    if (message?.tool_calls && message.tool_calls.length > 0) {
       console.log(`[LLM] Triggered ${message.tool_calls.length} tools`);
-      session.messages.push(message); // push the assistant tool call
+      session.messages.push(message as any); 
 
       for (const tc of message.tool_calls) {
         try {
@@ -415,43 +458,101 @@ async function processTurn(session: FioraSession): Promise<void> {
           const args = JSON.parse(tc.function.arguments);
           const rawResult = await tool.execute(args);
           
-          // Sanitize raw JSON payloads into conversational context so the LLM doesn't read JSON out loud
           let sanitizedResult = `Action successful. Output: ${rawResult}`;
           if (typeof rawResult === 'object') {
             const flattened = Object.entries(rawResult).map(([k, v]) => `${k} is ${v}`).join(', ');
             sanitizedResult = `Action successful. Data retrieved: ${flattened}`;
           }
-          session.messages.push({ role: 'tool', tool_call_id: tc.id, content: sanitizedResult });
+          session.messages.push({ role: 'tool', tool_call_id: tc.id, content: sanitizedResult } as any);
         } catch (err: any) {
           console.error('[TOOL] Execution failed:', err);
-          session.messages.push({ role: 'tool', tool_call_id: tc.id, content: `Action failed. Reason: ${err.message || 'Unknown'}` });
+          session.messages.push({ role: 'tool', tool_call_id: tc.id, content: `Action failed. Reason: ${err.message || 'Unknown'}` } as any);
         }
       }
 
       console.log('[LLM] Running second pass for conversational confirmation...');
-      llmJson = await runLLM();
-      message = llmJson.choices?.[0]?.message;
+      
+      session.isSpeaking = true;
+      session.playbackController.setStreamActive(true);
+      const ct = new CancellationToken();
+      session.playbackController.startPlayback(session.ws, session.streamSid, ct, session.stateMachine);
+      
+      const stream = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [session.messages[0], ...session.messages.slice(1).slice(-10)] as any,
+        stream: true,
+        max_tokens: 80,
+        temperature: 0.65,
+      });
+
+      let sentenceBuffer = '';
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        finalResponse += content;
+        sentenceBuffer += content;
+        
+        if (/[.!?]$/.test(sentenceBuffer.trim())) {
+          console.log(`[LLM CHUNK] ${sentenceBuffer.trim()}`);
+          if (session.piperProcess?.stdin) {
+            session.piperProcess.stdin.write(sentenceBuffer.trim() + '\n');
+          }
+          sentenceBuffer = '';
+        }
+      }
+      
+      if (sentenceBuffer.trim()) {
+        console.log(`[LLM CHUNK] ${sentenceBuffer.trim()}`);
+        if (session.piperProcess?.stdin) {
+          session.piperProcess.stdin.write(sentenceBuffer.trim() + '\n');
+        }
+      }
+      t2 = performance.now();
+
+    } else {
+      finalResponse = message?.content?.trim() || '';
+      t2 = performance.now();
+      
+      session.isSpeaking = true;
+      session.playbackController.setStreamActive(true);
+      const ct = new CancellationToken();
+      session.playbackController.startPlayback(session.ws, session.streamSid, ct, session.stateMachine);
+      
+      const sentences = finalResponse.match(/[^.!?]+[.!?]+/g) || [finalResponse];
+      for (const sent of sentences) {
+        if (sent.trim()) {
+           console.log(`[LLM CHUNK] ${sent.trim()}`);
+           if (session.piperProcess?.stdin) {
+             session.piperProcess.stdin.write(sent.trim() + '\n');
+           }
+        }
+      }
     }
 
-    const t2 = performance.now();
-    const response = message?.content?.trim();
-
-    if (!response) {
+    if (!finalResponse) {
       console.log('[LLM] Empty response — dropping');
       session.isProcessing = false;
       return;
     }
 
-    console.log(`FIORA: "${response}"`);
-    session.messages.push({ role: 'assistant', content: response });
+    console.log(`FIORA: "${finalResponse}"`);
+    session.messages.push({ role: 'assistant', content: finalResponse });
     session.turnCount++;
 
-    // STEP 3: TTS
-    console.log('[TURN] TTS...');
-    session.isSpeaking = true;
-    await speakToTwilio(session.ws, session.streamSid, response);
+    // STEP 3: PLAYBACK WAIT & TELEMETRY
+    console.log('[TURN] Waiting for playback completion...');
+    
+    // Safety buffer: Wait for Piper to initialize and populate the StreamQueue 
+    // before we drop the active flag, preventing premature termination.
+    await new Promise(r => setTimeout(r, 1000));
+    
+    session.playbackController.setStreamActive(false); 
+    await session.playbackController.waitForCompletion();
+    
     const t3 = performance.now();
-    console.log(`\n[LATENCY] STT: ${(t1-t0).toFixed(0)}ms | LLM: ${(t2-t1).toFixed(0)}ms | TTS: ${(t3-t2).toFixed(0)}ms | Total: ${(t3-t0).toFixed(0)}ms\n`);
+    console.log(`\n[LATENCY] Speech End -> STT Start: ${(t0 - t0).toFixed(0)}ms`); // Baseline
+    console.log(`[LATENCY] STT Duration: ${(t1 - t0).toFixed(0)}ms`);
+    console.log(`[LATENCY] LLM Total Duration: ${(t2 - t1_llm_start).toFixed(0)}ms`);
+    console.log(`[LATENCY] Pipeline to Playback Finish: ${(t3 - t0).toFixed(0)}ms\n`);
     
     await new Promise(r => setTimeout(r, 300)); // brief gap before listening again
     session.isSpeaking = false;
@@ -519,10 +620,11 @@ export function attachWsHandlers(ws: WebSocket, request: IncomingMessage) {
             break;
 
           case 'start': {
-            const { streamSid, callSid } = msg.start;
+            const { streamSid, callSid, customParameters } = msg.start;
+            const direction = customParameters?.direction || 'inbound';
             localStreamSid = streamSid;
-            const session = initSession(streamSid, callSid, ws);
-            console.log(`[SESSION] Started — callSid: ${callSid}`);
+            const session = initSession(streamSid, callSid, ws, direction as 'inbound' | 'outbound');
+            console.log(`[SESSION] Started — callSid: ${callSid} | direction: ${direction}`);
 
             // FIORA speaks first — async, don't block handler
             speakFirst(session).catch((err) => {
@@ -617,17 +719,33 @@ const start = async () => {
     const wss = new WebSocketServer({ noServer: true });
 
     server.server.on('upgrade', (request: IncomingMessage, socket, head) => {
-      const url = request.url;
-      console.log(`\n[UPGRADE] WebSocket upgrade request received`);
-      console.log(`[UPGRADE] Path: ${url}`);
+      const urlObj = new URL(request.url || '', `http://${request.headers.host}`);
       
-      if (url === '/media-stream') {
-        console.log('[UPGRADE] Path matches /media-stream — accepting handshake');
+      console.log(`[WS] Upgrade URL: ${request.url}`);
+      
+      if (urlObj.pathname.startsWith('/media-stream/')) {
+        const token = urlObj.pathname.split('/media-stream/')[1];
+        console.log(`[WS] Token: ${token}`);
+        
+        const isValid = token ? wsTokens.has(token) : false;
+        console.log(`[WS] Token valid: ${isValid}`);
+        
+        if (!isValid) {
+          const reason = !token ? "Missing token in path" : "Token expired or invalid";
+          console.error(`[WS] Rejected: ${reason}`);
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        } else {
+          // Consume token
+          wsTokens.delete(token as string);
+        }
+
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request);
         });
       } else {
-        console.warn(`[UPGRADE] Unknown path "${url}" — rejecting`);
+        console.error(`[WS] Rejected: Unknown path "${urlObj.pathname}"`);
         socket.destroy();
       }
     });

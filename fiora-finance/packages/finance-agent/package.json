@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "googleapis": "^173.0.0",
+    "razorpay": "^2.9.6",
+    "stripe": "^22.2.1",
     "zod": "^3.22.4"
   },
   "devDependencies": {

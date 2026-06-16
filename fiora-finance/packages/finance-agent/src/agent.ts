@@ -5,6 +5,8 @@ import { sendPaymentReminderTool } from './tools/sendPaymentReminder';
 import { generateDailySummaryTool } from './tools/generateDailySummary';
 import { detectLatePaymentsTool } from './tools/detectLatePayments';
 import { categorizeTransactionTool } from './tools/categorizeTransaction';
+import { getRecentPaymentsTool } from './tools/getRecentPayments';
+import { getRevenueMetricsTool } from './tools/getRevenueMetrics';
 import { FINANCE_AGENT_SYSTEM_PROMPT } from './prompts';
 
 export class FinanceAgent {
@@ -20,6 +22,8 @@ export class FinanceAgent {
       generateDailySummaryTool,
       detectLatePaymentsTool,
       categorizeTransactionTool,
+      getRecentPaymentsTool,
+      getRevenueMetricsTool,
     ];
   }
 }
