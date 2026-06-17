@@ -14,8 +14,10 @@
     "@fiora/finance-agent": "*",
     "@fiora/shared-memory-bus": "*",
     "@fiora/shared-types": "*",
+    "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "fastify": "^4.26.2",
+    "openai": "^6.42.0",
     "zod": "^3.22.4"
   },
   "devDependencies": {

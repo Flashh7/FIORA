@@ -17,13 +17,11 @@
     "fiora-marketing/services/*",
     "fiora-marketing/packages/*",
     "fiora-sales/services/*",
-    "fiora-sales/packages/*",
-    "fiora-support/services/*",
-    "fiora-support/packages/*"
+    "fiora-sales/packages/*"
   ],
   "scripts": {
-    "build": "turbo run build --filter=dashboard --filter=gateway --filter=@fiora/agent-support --filter=@fiora/agent-marketing --filter=@fiora/agent-voice",
-    "dev": "concurrently -n gateway,support,marketing,voice,dashboard -c blue,green,yellow,cyan,magenta \"npm --prefix fiora-voice/apps/gateway run dev\" \"npm --prefix fiora-support/services/agent-support run dev\" \"npm --prefix fiora-marketing/services/agent-marketing run dev\" \"npm --prefix fiora-voice/services/agent-voice run dev\" \"npm --prefix core/apps/dashboard run dev\"",
+    "build": "turbo run build --filter=dashboard --filter=gateway --filter=@fiora/agent-marketing --filter=@fiora/agent-voice",
+    "dev": "concurrently -n gateway,marketing,voice,finance,dashboard,outbound -c blue,yellow,cyan,green,magenta,red \"npm --prefix fiora-voice/apps/gateway run dev\" \"npm --prefix fiora-marketing/services/agent-marketing run dev\" \"npm --prefix fiora-voice/services/agent-voice run dev\" \"npm --prefix fiora-finance/services/agent-finance run dev\" \"npm --prefix core/apps/dashboard run dev\" \"npm --prefix fiora-voice/services/outbound-engine run dev\"",
     "lint": "turbo run lint",
     "test": "turbo run test"
   },

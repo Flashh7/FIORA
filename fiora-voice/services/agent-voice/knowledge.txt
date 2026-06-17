@@ -1,0 +1,281 @@
+FIORA MASTER KNOWLEDGE BASE
+
+COMPANY OVERVIEW
+
+Company Name:
+FIORA
+
+Mission:
+FIORA helps businesses automate customer interactions, lead generation, sales processes, customer support, and operational workflows using advanced AI voice agents and automation systems.
+
+We help businesses eliminate missed calls, improve response times, increase lead conversion rates, and operate more efficiently without increasing staffing costs.
+
+====================================================
+
+WHAT FIORA DOES
+
+FIORA provides AI-powered business automation.
+
+Our platform combines:
+
+* AI Voice Agents
+* Lead Generation Automation
+* Customer Support Automation
+* Sales Automation
+* Business Intelligence
+* CRM Integration
+* Marketing Automation
+
+The platform operates as a virtual business team that can answer calls, qualify leads, support customers, and generate business insights.
+
+====================================================
+
+CORE AGENTS
+
+HULK
+
+Role:
+Marketing and Lead Generation
+
+Responsibilities:
+
+* Explain company services
+* Qualify potential customers
+* Conduct outbound lead calls
+* Generate and manage marketing campaigns
+* Handle business inquiries
+
+Example:
+
+A business owner submits a lead list.
+
+Hulk automatically contacts prospects, explains the business, answers common questions, and identifies interested leads.
+
+Interested prospects are transferred to Iron Man.
+
+====================================================
+
+IRON MAN
+
+Role:
+Sales and Customer Acquisition
+
+Responsibilities:
+
+* Handle inbound calls
+* Capture requirements
+* Create bookings
+* Generate opportunities
+* Collect customer information
+* Create CRM records
+
+Example:
+
+A customer calls requesting a plumbing service.
+
+Iron Man gathers:
+
+* Name
+* Phone Number
+* Service Requirement
+* Preferred Date
+* Budget
+
+The request is automatically stored inside the dashboard.
+
+====================================================
+
+HOMELANDER
+
+Role:
+Customer Support
+
+Responsibilities:
+
+* Handle customer complaints
+* Resolve support requests
+* Create support tickets
+* Answer customer questions
+* Escalate urgent issues
+
+Example:
+
+A customer reports a delayed service.
+
+Homelander captures the issue and creates a support ticket for the business.
+
+====================================================
+
+DOCTOR STRANGE
+
+Role:
+Business Intelligence
+
+Dashboard Only
+
+Responsibilities:
+
+* Revenue analysis
+* Profit analysis
+* Conversion tracking
+* Business forecasting
+* Performance reporting
+
+Doctor Strange is not customer-facing.
+
+====================================================
+
+TARGET CUSTOMERS
+
+FIORA is designed for:
+
+* Plumbing Companies
+* HVAC Businesses
+* Electrical Contractors
+* Home Service Businesses
+* Real Estate Agencies
+* Clinics
+* Salons
+* Restaurants
+* Professional Service Firms
+* Local Businesses
+
+====================================================
+
+PLUMBING INDUSTRY USE CASE
+
+Problem:
+
+Many plumbing companies lose revenue because calls are missed after hours or during busy periods.
+
+Solution:
+
+FIORA provides:
+
+24/7 AI Call Answering
+
+Emergency Call Capture
+
+Appointment Scheduling
+
+Lead Qualification
+
+Customer Support
+
+Benefits:
+
+* No missed calls
+* Faster response times
+* More booked jobs
+* Increased revenue
+
+====================================================
+
+HVAC INDUSTRY USE CASE
+
+Problem:
+
+HVAC companies struggle to manage seasonal spikes in demand.
+
+Solution:
+
+FIORA handles:
+
+* Call overflow
+* Appointment booking
+* Service inquiries
+* Lead qualification
+
+Benefits:
+
+* Reduced administrative workload
+* Increased conversion rates
+* Better customer experience
+
+====================================================
+
+ELECTRICAL CONTRACTOR USE CASE
+
+Problem:
+
+Electricians often miss calls while on-site.
+
+Solution:
+
+FIORA acts as a virtual receptionist.
+
+Benefits:
+
+* Every call answered
+* Every lead captured
+* Better scheduling efficiency
+
+====================================================
+
+COMMON CUSTOMER QUESTIONS
+
+Q: What does FIORA do?
+
+Answer:
+
+FIORA provides AI-powered voice agents that help businesses automate marketing, sales, customer support, and business operations.
+
+---
+
+Q: How can FIORA help my business?
+
+Answer:
+
+FIORA ensures that every customer inquiry is answered, every lead is captured, and every support request is tracked. This helps businesses increase revenue while reducing operational workload.
+
+---
+
+Q: Will I lose the human touch?
+
+Answer:
+
+No.
+
+FIORA is designed to sound natural and professional while seamlessly escalating to human staff whenever necessary.
+
+---
+
+Q: Does FIORA work after business hours?
+
+Answer:
+
+Yes.
+
+Our AI agents operate 24 hours a day and can answer calls, capture leads, and create support tickets even when your team is unavailable.
+
+---
+
+Q: Can FIORA integrate with our existing systems?
+
+Answer:
+
+Yes.
+
+FIORA is designed to integrate with CRM systems, scheduling platforms, and business management tools.
+
+====================================================
+
+KEY BENEFITS
+
+* 24/7 Availability
+* No Missed Calls
+* Faster Lead Response
+* Improved Customer Experience
+* Increased Conversion Rates
+* Automated Support
+* Business Intelligence Insights
+* Reduced Staffing Costs
+* Scalable Operations
+
+====================================================
+
+POSITIONING
+
+FIORA is not simply a chatbot.
+
+FIORA acts as an AI-powered business team capable of handling marketing, sales, customer support, and operational intelligence.

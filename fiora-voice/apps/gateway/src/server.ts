@@ -11,16 +11,67 @@ import { PassThrough } from 'stream';
 import fastifyJwt from '@fastify/jwt';
 import bcrypt from 'bcryptjs';
 import fastifyRateLimit from '@fastify/rate-limit';
+import twilio from 'twilio';
+import fastifyRawBody from 'fastify-raw-body';
+import fastifyMultipart from '@fastify/multipart';
+import { stripeWebhookRoutes, provisioningQueue } from './stripe';
+import { knowledgeRoutes } from './knowledge';
 
 const prisma = new PrismaClient();
+
+
 const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
+redisSub.setMaxListeners(0); // Allow infinite SSE connections without EventEmiiter warnings
 
 const server = Fastify({
   logger: false,
 });
 
+// Health check endpoint for external orchestration and load balancers
+server.get('/health', async (request, reply) => {
+  try {
+    // Verify database connectivity
+    await prisma.$queryRaw`SELECT 1`;
+    return reply.status(200).send({ status: 'ok', database: 'connected', timestamp: new Date().toISOString() });
+  } catch (error) {
+    return reply.status(503).send({ status: 'error', database: 'disconnected', timestamp: new Date().toISOString() });
+  }
+});
+
+// Option C: Cloud Scheduler EventBridge Endpoint
+server.post('/api/internal/reset-usage', async (request: any, reply: any) => {
+  const authHeader = request.headers['authorization'];
+  if (authHeader !== `Bearer ${process.env.INTERNAL_SECRET || 'dev_secret'}`) {
+    return reply.status(401).send({ error: 'Unauthorized' });
+  }
+
+  console.log('[CRON] Running monthly usage_current reset for all tenants');
+  try {
+    await prisma.serviceEntitlement.updateMany({
+      data: { usage_current: 0 }
+    });
+    console.log('[CRON] Successfully reset usage_current to 0.');
+    return reply.status(200).send({ success: true });
+  } catch (err) {
+    console.error('[CRON ERROR]', err);
+    return reply.status(500).send({ error: 'Internal Server Error' });
+  }
+});
+
 import fastifyFormbody from '@fastify/formbody';
+
+server.register(fastifyRawBody, {
+  field: 'rawBody', // the fastify request field where the raw body will be placed
+  global: false, // add it only to specific routes where needed
+  encoding: 'utf8', // default encoding
+  runFirst: true // ensure it runs before body parsing
+});
+
+server.register(fastifyMultipart, { limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
+
+server.register(stripeWebhookRoutes);
+server.register(knowledgeRoutes);
 server.register(fastifyFormbody);
 
 server.register(cors, {
@@ -93,10 +144,13 @@ server.post('/outbound-twiml', async (request, reply) => {
   
   // INITIAL VERIFICATION STEP: Just say hello
   // Full websocket integration will replace this after first test.
+  const host = request.headers.host;
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="wss://video-tragedy-duly.ngrok-free.dev/api/voice/stream" />
+    <Stream url="wss://${host}/api/voice/stream">
+      <Parameter name="direction" value="outbound" />
+    </Stream>
   </Connect>
 </Response>`;
 
@@ -322,6 +376,94 @@ server.get('/api/ws/live', (request, reply) => {
   request.raw.on('close', () => {
     redisSub.off('message', onMessage);
   });
+});
+
+// --- SUPER ADMIN TENANT ROUTES ---
+server.get('/api/admin/tenants', async (request, reply) => {
+  try {
+    const tenants = await prisma.tenant.findMany({
+      include: { phone_numbers: true, operators: true, entitlements: true },
+      orderBy: { created_at: 'desc' }
+    });
+    return reply.send(tenants);
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: 'Failed to fetch tenants' });
+  }
+});
+
+server.put('/api/admin/tenants/:id/entitlements', async (request: any, reply) => {
+  try {
+    const { id } = request.params;
+    const adminId = request.user?.id || 'system-admin-fallback';
+    const { feature_key, is_enabled } = request.body;
+
+    const entitlement = await prisma.serviceEntitlement.upsert({
+      where: {
+        tenant_id_feature_key: {
+          tenant_id: id,
+          feature_key
+        }
+      },
+      update: {
+        is_enabled
+      },
+      create: {
+        tenant_id: id,
+        feature_key,
+        is_enabled
+      }
+    });
+
+    await prisma.adminAuditLog.create({
+      data: {
+        tenant_id: id,
+        admin_user_id: adminId,
+        action: is_enabled ? `ENABLE_${feature_key.toUpperCase()}` : `DISABLE_${feature_key.toUpperCase()}`,
+        previous_value: { is_enabled: !is_enabled },
+        new_value: { is_enabled }
+      }
+    });
+
+    return reply.send(entitlement);
+  } catch (err) {
+    console.error(err);
+    return reply.status(500).send({ error: 'Failed to update tenant entitlement' });
+  }
+});
+
+server.post('/api/admin/tenants/:id/provision', async (request: any, reply) => {
+  try {
+    const { id } = request.params;
+    const adminId = request.user?.id || 'system-admin-fallback';
+    const { countryCode = 'US', areaCode } = request.body || {};
+    
+    let tenant = await prisma.tenant.findUnique({ where: { id } });
+    if (!tenant) return reply.status(404).send({ error: 'Tenant not found' });
+    
+    if (tenant.provisioning_status === 'PROVISIONING') {
+      return reply.status(429).send({ error: 'Provisioning already in progress' });
+    }
+    if (tenant.provisioning_status === 'ACTIVE' || tenant.twilio_subaccount_sid) {
+      return reply.status(400).send({ error: 'Tenant already has a provisioned Twilio Sandbox' });
+    }
+
+    await prisma.tenant.update({
+      where: { id },
+      data: { country_code: countryCode, preferred_area_code: areaCode || null }
+    });
+
+    // Enqueue async job
+    await provisioningQueue.add('provision-tenant', { tenantId: id, adminId }, {
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 2000 }
+    });
+
+    return reply.send({ success: true, message: 'Provisioning enqueued' });
+  } catch (err: any) {
+    console.error(err);
+    return reply.status(500).send({ error: 'Internal Server Error' });
+  }
 });
 
 const start = async () => {

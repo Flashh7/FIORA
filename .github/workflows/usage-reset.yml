@@ -1,0 +1,15 @@
+name: Monthly Usage Reset
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+
+jobs:
+  reset-usage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke Reset Usage API
+        run: |
+          curl -X POST https://api.fiora.com/api/internal/reset-usage \
+          -H "Authorization: Bearer ${{ secrets.INTERNAL_RESET_SECRET }}"

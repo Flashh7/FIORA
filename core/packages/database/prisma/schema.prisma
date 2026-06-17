@@ -1,10 +1,12 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [vector]
 }
 
 enum ExecutionMode {
@@ -26,6 +28,17 @@ model Tenant {
   created_at             DateTime     @default(now())
   updated_at             DateTime     @updatedAt
 
+  twilio_subaccount_sid  String?
+  provisioning_status    String       @default("IDLE") // 'IDLE', 'PENDING', 'PROVISIONING', 'ACTIVE', 'FAILED'
+  provisioning_error     String?
+  account_status         String       @default("ACTIVE") // 'ACTIVE', 'SUSPENDED', 'DEPROVISIONED'
+  country_code           String       @default("US")
+  preferred_area_code    String?
+  stripe_customer_id     String?
+  stripe_subscription_id String?
+
+  entitlements    ServiceEntitlement[]
+  admin_logs      AdminAuditLog[]
   operators       Operator[]
   event_ledger    EventLedger[]
   executions      Execution[]
@@ -35,6 +48,15 @@ model Tenant {
   mutation_logs   MutationAuditLog[]
   appointments    Appointment[]
   voice_sessions  VoiceSession[]
+  phone_numbers   PhoneNumber[]
+  documents       TenantDocument[]
+  
+  // V2 Relations
+  leads           Lead[]
+  requests        Request[]
+  opportunities   Opportunity[]
+  campaigns       MarketingCampaign[]
+  support_tickets SupportTicket[]
 }
 
 model Operator {
@@ -223,6 +245,66 @@ model DriftReport {
 
   @@index([original_execution_id])
   @@index([replay_execution_id])
+}
+
+// ==========================================
+// V2 ARCHITECTURE MODELS (Hulk, Iron Man, Doctor Strange)
+// ==========================================
+
+model Lead {
+  id           String   @id @default(uuid())
+  tenant_id    String
+  name         String
+  phone_number String
+  source       String?
+  notes        String?
+  status       String   @default("NEW") // NEW, CONTACTED, QUALIFIED, LOST, TRANSFERRED
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant       Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+model Request {
+  id           String   @id @default(uuid())
+  tenant_id    String
+  customer_name String
+  phone        String
+  email        String?
+  requirement  String
+  budget       Int?     // Stored in cents/base currency
+  date         DateTime?
+  notes        String?
+  status       String   @default("NEW") // NEW, IN_PROGRESS, COMPLETED
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant       Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+model Opportunity {
+  id           String   @id @default(uuid())
+  tenant_id    String
+  title        String
+  value        Int      // Value in base currency
+  stage        String   @default("DISCOVERY") // DISCOVERY, PROPOSAL, NEGOTIATION, WON, LOST
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant       Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+model MarketingCampaign {
+  id           String   @id @default(uuid())
+  tenant_id    String
+  name         String
+  platform     String   // META, GOOGLE
+  status       String   @default("DRAFT")
+  budget_daily Int
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  tenant       Tenant   @relation(fields: [tenant_id], references: [id])
 }
 
 // Severity Classification
@@ -583,4 +665,74 @@ model WorkforceFatigue {
   escalation_density    Int
   intervention_fatigue  Float
   recorded_at           DateTime            @default(now())
+}
+
+// Phase 17: Multi-Tenant Voice Routing
+model PhoneNumber {
+  id            String   @id @default(uuid())
+  tenant_id     String
+  phone_number  String   @unique // e.g. +15551234567
+  business_name String
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  tenant        Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+// Phase 18: Service Entitlements (Key-Value)
+model ServiceEntitlement {
+  id             String   @id @default(uuid())
+  tenant_id      String
+  feature_key    String   // 'voice_agent', 'finance_agent', 'marketing_agent', 'support_agent'
+  is_enabled     Boolean  @default(false)
+  usage_limit    Int?     // e.g., 1000 call minutes/month
+  usage_current  Int      @default(0)
+  tier           String   @default("starter") // 'starter', 'growth', 'enterprise'
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  tenant         Tenant   @relation(fields: [tenant_id], references: [id])
+  
+  @@unique([tenant_id, feature_key])
+}
+
+// Phase 18: Admin Audit Logging
+model AdminAuditLog {
+  id             String   @id @default(uuid())
+  tenant_id      String
+  admin_user_id  String
+  action         String   // 'ENABLE_VOICE', 'DISABLE_FINANCE', 'ASSIGN_NUMBER'
+  previous_value Json?
+  new_value      Json?
+  timestamp      DateTime @default(now())
+
+  tenant         Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+
+
+model SupportTicket {
+  id           String   @id @default(uuid())
+  tenant_id    String
+  customer     String
+  issue        String
+  priority     String   @default("Medium")
+  status       String   @default("Open")
+  created_at   DateTime @default(now())
+
+  tenant       Tenant   @relation(fields: [tenant_id], references: [id])
+}
+
+model TenantDocument {
+  id         String   @id @default(uuid())
+  tenant_id  String
+  title      String
+  content    String
+  source_url String?
+  embedding  Unsupported("vector(1536)")?
+  created_at DateTime @default(now())
+
+  tenant     Tenant   @relation(fields: [tenant_id], references: [id])
+
+  @@index([tenant_id])
 }
