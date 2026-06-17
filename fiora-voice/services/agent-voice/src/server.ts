@@ -18,9 +18,6 @@ import { SessionStateMachine, TelemetryLogger, ToolLockManager, VadMonitor, Play
 import { validateRequest } from 'twilio/lib/webhooks/webhooks';
 import rateLimit from '@fastify/rate-limit';
 
-// @ts-ignore
-import WebSocket from 'ws';
-
 const prisma = new PrismaClient();
 const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
 const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
@@ -184,6 +181,8 @@ server.post('/twilio-status-callback', async (req, reply) => {
 // Outbound Call TwiML instructions
 server.post('/outbound-twiml', async (request, reply) => {
   const host = request.headers.host;
+  const body = request.body as Record<string, string>;
+  const toNumber = body?.To || 'Unknown';
   
   // Generate a one-time secure token for the WebSocket connection
   const secureToken = Math.random().toString(36).substring(2, 15);
@@ -201,6 +200,7 @@ server.post('/outbound-twiml', async (request, reply) => {
   <Connect>
     <Stream url="${wsUrl}">
       <Parameter name="direction" value="outbound" />
+      <Parameter name="customerPhone" value="${toNumber}" />
     </Stream>
   </Connect>
 </Response>`;
@@ -240,6 +240,11 @@ const getGroqClientForPersona = (persona: string) => {
   };
 };
 
+const nvidiaClient = new OpenAI({
+  apiKey: process.env.NVIDIA_API_KEY || '',
+  baseURL: 'https://integrate.api.nvidia.com/v1'
+});
+
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
@@ -251,7 +256,7 @@ interface ChatMessage {
 interface GlobalSessionState {
   customer: { name: string | null; phone: string | null; email: string | null; };
   intent: string | null;
-  marketing: { leadSource: string | null; interested: boolean; qualified: boolean; };
+  marketing: { leadSource: string | null; interested: boolean; qualified: boolean; pitchGiven: boolean; leadSaved?: boolean; };
   sales: { requirement: string | null; budget: string | null; bookingDate: string | null; opportunityCreated: boolean; };
   support: { issueType: string | null; ticketCreated: boolean; priority: string | null; };
 }
@@ -282,6 +287,7 @@ interface FioraSession {
   piperProcess: ChildProcess | null;
   activePersona: 'RECEPTIONIST' | 'HULK' | 'IRON_MAN' | 'HOMELANDER';
   sessionState: GlobalSessionState;
+  shouldHangup?: boolean;
 }
 
 const sessions = new Map<string, FioraSession>();
@@ -308,9 +314,10 @@ VOICE RULES:
 
 const HOMELANDER_SYSTEM_PROMPT = `You are Homelander, the Support Agent for FIORA.
 You handle all customer support, complaints, refund requests, and issue resolution.
-You must use the update_session_state tool to capture their name and issue (support_issueType).
-NEVER ask for information that is already present in the Current Session State.
-You MUST use the create_support_ticket() tool to log it in the dashboard.
+DO NOT use the create_support_ticket tool immediately!
+1. You MUST ask the customer for their name and wait for their response.
+2. You MUST ask the customer for their issue and wait for their response.
+3. Once you have both their name and their issue, use the create_support_ticket() tool to log it in the dashboard. This will automatically end the call.
 If the customer asks to speak to Sales or Marketing, use the appropriate routing tool to transfer them.
 
 VOICE RULES:
@@ -321,18 +328,81 @@ VOICE RULES:
 
 const getHulkSystemPrompt = (direction: 'inbound' | 'outbound') => `You are Hulk, the Marketing Agent for FIORA.
 ${direction === 'outbound' ? 
-  "You are conducting an OUTBOUND marketing call. You must pitch the business services to the user and answer any doubts they have. DO NOT ask them for their requirement." :
+  "You are conducting an OUTBOUND marketing call. Follow the Outbound Script exactly." :
   "You answer inbound marketing questions and provide information about FIORA's services."}
-You must use the update_session_state tool to record if the user is interested (marketing_interested) and their lead source (marketing_leadSource).
-If they just ask for information, answer them directly.
-If the customer explicitly asks to speak to Sales or Support, or explicitly agrees to buy or book a service, use the appropriate routing tool to transfer them. DO NOT transfer them unless they explicitly agree.
 
-VOICE RULES — FOLLOW STRICTLY:
-1. MAX 2-3 SENTENCES.
-2. NO MARKDOWN, NO LISTS.
-3. CONVERSATIONAL TONE.
-4. ONE QUESTION ONLY.
-5. NEVER introduce yourself again. You have already introduced yourself.`;
+HULK OUTBOUND SCRIPT V3
+
+Hello, I'm Hulk from FIORA.
+
+FIORA helps businesses automate customer communication using AI voice agents. Our AI can answer incoming customer calls 24/7, handle bookings, sales inquiries, support requests, and service questions, while also making outbound calls to qualify leads and follow up with customers automatically. The goal is to help businesses capture more opportunities, reduce missed calls, and save time without increasing staffing costs.
+
+Based on what I've explained, would you say you are interested, not interested, or would like more information?
+
+WAIT FOR RESPONSE.( WAIT UNTIL HE SAYS INTERESTED OR NOT INTERESTED AND CHOOSE THE BELOW )
+
+====================================================
+
+IF INTERESTED
+
+Thank you.
+
+Create Lead Status:
+
+INTERESTED
+
+Store Call Notes.
+
+End Call Politely.
+
+====================================================
+
+IF NOT INTERESTED
+
+Thank you for your time.
+
+Create Lead Status:
+
+NOT_INTERESTED
+
+End Call Politely.
+
+====================================================
+
+IF WANTS MORE INFORMATION
+
+Answer questions naturally using the FIORA Knowledge Base.
+
+When the conversation ends:
+
+Create Lead Status:
+
+MORE_INFORMATION_REQUESTED
+
+Store Questions Asked.
+
+End Call Politely.
+
+====================================================
+
+RULES
+
+Keep the introduction under 25 seconds.
+
+Do not ask unnecessary questions.
+
+Do not ask for name.
+
+Do not ask for budget.
+
+Do not transfer to Iron Man.
+
+The objective is only:
+
+Explain FIORA.
+Determine interest level.
+Record outcome.
+End call professionally.`;
 
 const IRON_MAN_SYSTEM_PROMPT = `You are Iron Man, the Sales Agent for FIORA.
 You capture requirements and create business opportunities. You handle incoming phone calls, booking requests, and lead qualification.
@@ -424,7 +494,7 @@ const switchPiperModel = (session: FioraSession) => {
 function initSession(streamSid: string, callSid: string, ws: WebSocket, direction: 'inbound' | 'outbound' = 'inbound', tenantData?: { tenantId: string, businessName: string }): FioraSession {
   const stateMachine = new SessionStateMachine();
   const playbackController = new PlaybackController();
-  const vadMonitor = new VadMonitor({ activeThreshold: 0.2, silenceDurationMs: 400 });
+  const vadMonitor = new VadMonitor();
   const interruptManager = new InterruptManager(stateMachine, playbackController, vadMonitor);
 
   const session: FioraSession = {
@@ -455,7 +525,7 @@ function initSession(streamSid: string, callSid: string, ws: WebSocket, directio
     sessionState: {
       customer: { name: null, phone: null, email: null },
       intent: null,
-      marketing: { leadSource: null, interested: false, qualified: false },
+      marketing: { leadSource: null, interested: false, qualified: false, pitchGiven: false, leadSaved: false },
       sales: { requirement: null, budget: null, bookingDate: null, opportunityCreated: false },
       support: { issueType: null, ticketCreated: false, priority: null }
     }
@@ -467,6 +537,9 @@ function initSession(streamSid: string, callSid: string, ws: WebSocket, directio
     console.log('[VAD] speech_started');
     session.playbackController.abort();
     session.playbackController.getQueue().flush();
+    if (session.ws.readyState === WebSocket.OPEN) {
+      session.ws.send(JSON.stringify({ event: 'clear', streamSid: session.streamSid }));
+    }
   });
 
   vadMonitor.on('speech_ended', () => {
@@ -554,29 +627,27 @@ async function speakToTwilio(
 // ── FIX 3: speakFirst with post-speech buffer ─────────────────────────────────
 
 async function speakFirst(session: FioraSession): Promise<void> {
-  const bizName = session.businessName || "us";
-  
-  let greeting = "";
   if (session.direction === 'outbound') {
-    greeting = `Hello, this is Hulk calling from ${bizName}. I'm reaching out because we have some exciting new services that could really benefit you. Are you open to a quick chat?`;
+    // Generate dynamic pitch using the LLM and Knowledge Base
+    session.messages.push({ role: 'user', content: 'Hello' } as any);
+    await processTurn(session, true);
   } else {
-    greeting = `Welcome to FIORA. Would you like Marketing Sales or Support?`;
-  }
-    
-  session.messages.push({ role: 'assistant', content: greeting });
-
-  session.isSpeaking = true;
-  try {
-    await speakToTwilio(session, greeting);
-  } finally {
-    session.isSpeaking = false;
-    console.log('[SESSION] Greeting done — now listening for caller');
+    const greeting = `Welcome to FIORA. Would you like Marketing Sales or Support?`;
+    session.messages.push({ role: 'assistant', content: greeting });
+    session.isSpeaking = true;
+    try {
+        session.sessionState.marketing.pitchGiven = true;
+        await speakToTwilio(session, greeting);
+    } finally {
+      session.isSpeaking = false;
+      console.log('[SESSION] Greeting done — now listening for caller');
+    }
   }
 }
 
 // ── FIX 4: processTurn with hard minimum audio guard ─────────────────────────
 
-async function processTurn(session: FioraSession): Promise<void> {
+async function processTurn(session: FioraSession, skipStt: boolean = false): Promise<void> {
 
   if (session.isProcessing) {
     console.log('[TURN] Already processing — skip');
@@ -584,7 +655,7 @@ async function processTurn(session: FioraSession): Promise<void> {
   }
 
   // HARD MINIMUM: less than 20 chunks = ~250ms = noise/breathing, not speech
-  if (session.audioChunks.length < 20) {
+  if (!skipStt && session.audioChunks.length < 20) {
     console.log(`[TURN] Dropped — only ${session.audioChunks.length} chunks (too short)`);
     session.audioChunks = [];
     return;
@@ -599,43 +670,46 @@ async function processTurn(session: FioraSession): Promise<void> {
 
   try {
     const t0 = performance.now();
+    let t1 = t0;
 
-    // STEP 1: STT
-    console.log('[TURN] STT...');
-    const wav = mulawChunksToWav(chunks);
+    if (!skipStt) {
+      // STEP 1: STT
+      console.log('[TURN] STT...');
+      const wav = mulawChunksToWav(chunks);
 
-    const formData = new FormData();
-    formData.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav');
-    formData.append('model', 'whisper-large-v3');
-    formData.append('response_format', 'json');
-    formData.append('language', 'en');
+      const formData = new FormData();
+      formData.append('file', new Blob([new Uint8Array(wav)], { type: 'audio/wav' }), 'audio.wav');
+      formData.append('model', 'whisper-large-v3');
+      formData.append('response_format', 'json');
+      formData.append('language', 'en');
 
-    const { key: currentGroqKey } = getGroqClientForPersona(session.activePersona);
-    const sttRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${currentGroqKey}` },
-      body: formData,
-    });
+      const { key: currentGroqKey } = getGroqClientForPersona(session.activePersona);
+      const sttRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentGroqKey}` },
+        body: formData,
+      });
 
-    if (!sttRes.ok) {
-      const errText = await sttRes.text();
-      throw new Error(`Whisper failed ${sttRes.status}: ${errText}`);
+      if (!sttRes.ok) {
+        const errText = await sttRes.text();
+        throw new Error(`Whisper failed ${sttRes.status}: ${errText}`);
+      }
+
+      const sttJson = await sttRes.json();
+      const transcript = sttJson.text?.trim();
+      t1 = performance.now();
+
+      console.log(`[STT] Raw: "${transcript}"`);
+
+      if (!transcript || transcript.length < 2) {
+        console.log('[STT] Empty — dropping turn');
+        session.isProcessing = false;
+        return;
+      }
+
+      console.log(`User: "${transcript}"`);
+      session.messages.push({ role: 'user', content: transcript });
     }
-
-    const sttJson = await sttRes.json();
-    const transcript = sttJson.text?.trim();
-    const t1 = performance.now();
-
-    console.log(`[STT] Raw: "${transcript}"`);
-
-    if (!transcript || transcript.length < 2) {
-      console.log('[STT] Empty — dropping turn');
-      session.isProcessing = false;
-      return;
-    }
-
-    console.log(`User: "${transcript}"`);
-    session.messages.push({ role: 'user', content: transcript });
 
     // STEP 2: LLM
     console.log('[TURN] LLM...');
@@ -667,44 +741,56 @@ async function processTurn(session: FioraSession): Promise<void> {
       }
     ];
 
-    const { client: groq } = getGroqClientForPersona(session.activePersona);
-    const llmRes = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      messages: trimmedMessages as any,
-      tools: session.activePersona === 'HULK' ? [
-        UPDATE_STATE_TOOL,
-        ...ROUTING_TOOLS
-      ] : session.activePersona === 'RECEPTIONIST' ? [
-        ...ROUTING_TOOLS
-      ] : session.activePersona === 'IRON_MAN' ? [
-        UPDATE_STATE_TOOL,
-        ...ROUTING_TOOLS,
+
+    const activeTools = session.activePersona === 'HULK' ? (
+      (session.direction === 'inbound' || session.turnCount >= 2) ? [
         {
           type: 'function',
           function: { 
             name: 'create_lead', 
-            description: 'Create a lead/opportunity in the dashboard once you have requirements',
-            parameters: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' }, requirement: { type: 'string' } }, required: ['name', 'phone', 'requirement'] }
+            description: 'Create a lead in the dashboard and store their status. This will also end the call.',
+            parameters: { type: 'object', properties: { name: { type: 'string', description: "The customer's name. If you do not know it, set this to 'Unknown'." }, phone: { type: 'string' }, requirement: { type: 'string' }, status: { type: 'string', enum: ['INTERESTED', 'NOT_INTERESTED', 'MORE_INFORMATION_REQUESTED'], description: 'The exact outcome of the pitch' } }, required: ['status'] }
           }
         }
-      ] : session.activePersona === 'HOMELANDER' ? [
-        UPDATE_STATE_TOOL,
-        ...ROUTING_TOOLS,
-        {
-          type: 'function',
-          function: { 
-            name: 'create_support_ticket', 
-            description: 'Create a support ticket in the dashboard for the customer issue',
-            parameters: { type: 'object', properties: { customer: { type: 'string' }, issue: { type: 'string' } }, required: ['customer', 'issue'] }
-          }
+      ] : undefined
+    ) : session.activePersona === 'RECEPTIONIST' ? [
+      ...ROUTING_TOOLS
+    ] : session.activePersona === 'IRON_MAN' ? [
+      UPDATE_STATE_TOOL,
+      ...ROUTING_TOOLS,
+      {
+        type: 'function',
+        function: { 
+          name: 'create_lead', 
+          description: 'Create a lead/opportunity in the dashboard once you have requirements',
+          parameters: { type: 'object', properties: { name: { type: 'string' }, phone: { type: 'string' }, requirement: { type: 'string' }, interested: { type: 'boolean', description: 'True if interested, false if declined' } }, required: ['name', 'phone', 'requirement'] }
         }
-      ] : undefined,
-      tool_choice: 'auto',
+      }
+    ] : session.activePersona === 'HOMELANDER' ? [
+      UPDATE_STATE_TOOL,
+      ...ROUTING_TOOLS,
+      {
+        type: 'function',
+        function: { 
+          name: 'create_support_ticket', 
+          description: 'Create a support ticket in the dashboard for the customer issue',
+          parameters: { type: 'object', properties: { customer: { type: 'string' }, issue: { type: 'string' } }, required: ['customer', 'issue'] }
+        }
+      }
+    ] : undefined;
+
+    const payload: any = {
+      model: 'meta/llama-3.1-8b-instruct',
+      messages: trimmedMessages as any,
       max_tokens: 150,
-      temperature: 0.65,
-      presence_penalty: 0.6,
-      frequency_penalty: 0.4,
-    });
+      temperature: 0.2,
+    };
+    if (activeTools) {
+      payload.tools = activeTools;
+      payload.tool_choice = 'auto';
+    }
+
+    const llmRes = await nvidiaClient.chat.completions.create(payload);
 
     let message = llmRes.choices?.[0]?.message;
     let finalResponse = '';
@@ -771,24 +857,37 @@ async function processTurn(session: FioraSession): Promise<void> {
             sanitizedResult = "Session state updated successfully.";
           }
           else if (toolName === 'create_lead') {
+            const isInterested = args.interested !== undefined ? args.interested : session.sessionState.marketing.interested;
+            const statusVal = args.status ? args.status : (isInterested ? 'INTERESTED' : (isInterested === false ? 'NOT_INTERESTED' : 'NEW'));
+
             await prisma.lead.create({
               data: {
-                tenant_id: session.tenantId || 'unknown_tenant',
-                name: args.name,
-                phone_number: args.phone,
-                source: 'Inbound Call (Iron Man)',
-                status: 'New',
-                notes: args.requirement
+                tenant_id: (session.tenantId === 'SYSTEM' || !session.tenantId) ? ((await prisma.tenant.findFirst())?.id || 'SYSTEM') : session.tenantId,
+                name: args.name || session.sessionState.customer.name || 'Unknown',
+                phone_number: args.phone || session.sessionState.customer.phone || 'Unknown',
+                source: session.direction === 'outbound' ? 'Marketing Outbound' : 'Inbound Call',
+                status: statusVal,
+                notes: args.requirement || session.sessionState.sales.requirement || 'No notes provided'
               }
             });
-            sanitizedResult = `Action successful. Lead created for ${args.name}.`;
+            session.sessionState.marketing.leadSaved = true;
+            sanitizedResult = `Action successful. Lead created for ${args.name || 'Unknown'}.`;
+            if (session.activePersona === 'HULK') {
+              console.log('[CALL] Hulk triggered create_lead. Initiating hangup sequence.');
+              session.shouldHangup = true;
+            }
+          }
+          else if (toolName === 'end_call') {
+            console.log('[CALL] LLM triggered end_call');
+            session.shouldHangup = true;
+            sanitizedResult = "Call will end immediately after you speak your next message. Please say goodbye.";
           }
           else if (toolName === 'create_support_ticket') {
             await prisma.supportTicket.create({
               data: {
-                tenant_id: session.tenantId || 'unknown_tenant',
-                customer: args.customer,
-                issue: args.issue,
+                tenant_id: (session.tenantId === 'SYSTEM' || !session.tenantId) ? ((await prisma.tenant.findFirst())?.id || 'SYSTEM') : session.tenantId,
+                customer: args.customer || session.sessionState.customer.name || 'Unknown',
+                issue: args.issue || 'No issue provided',
                 priority: 'High',
                 status: 'Open'
               }
@@ -857,13 +956,12 @@ async function processTurn(session: FioraSession): Promise<void> {
       const ct = new CancellationToken();
       session.playbackController.startPlayback(session.ws, session.streamSid, ct, session.stateMachine);
       
-      const { client: groqStream } = getGroqClientForPersona(session.activePersona);
-      const stream = await groqStream.chat.completions.create({
-        model: 'llama-3.1-8b-instant',
+      const stream = await nvidiaClient.chat.completions.create({
+        model: 'meta/llama-3.1-8b-instruct',
         messages: [session.messages[0], ...session.messages.slice(1).slice(-10)] as any,
         stream: true,
         max_tokens: 80,
-        temperature: 0.65,
+        temperature: 0.2,
       });
 
       let sentenceBuffer = '';
@@ -892,6 +990,22 @@ async function processTurn(session: FioraSession): Promise<void> {
 
     } else {
       finalResponse = message?.content?.trim() || '';
+      
+      // Filter out DeepSeek <think> reasoning blocks COMPLETELY (including their content)
+      finalResponse = finalResponse.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+      
+      // Filter out any other XML/HTML tags (stripping the tags)
+      finalResponse = finalResponse.replace(/<[^>]+>/g, '').trim();
+      
+      // Fallback: If the model hallucinates a raw JSON tool call instead of using the API
+      if (finalResponse.startsWith('{') && finalResponse.includes('"name"') || finalResponse.includes('```json')) {
+        console.log('[LLM] Caught hallucinated JSON tool call. Suppressing speech.');
+        if (finalResponse.includes('end_call') || finalResponse.includes('create_lead')) {
+          session.shouldHangup = true;
+        }
+        finalResponse = "Okay, our team will be in touch shortly. Have a great day!";
+      }
+
       t2 = performance.now();
       
       session.isSpeaking = true;
@@ -918,6 +1032,7 @@ async function processTurn(session: FioraSession): Promise<void> {
 
     console.log(`FIORA: "${finalResponse}"`);
     session.messages.push({ role: 'assistant', content: finalResponse });
+    session.sessionState.marketing.pitchGiven = true;
     session.turnCount++;
 
     // STEP 3: PLAYBACK WAIT & TELEMETRY
@@ -929,6 +1044,12 @@ async function processTurn(session: FioraSession): Promise<void> {
     
     session.playbackController.setStreamActive(false); 
     await session.playbackController.waitForCompletion();
+    
+    if (session.shouldHangup) {
+      console.log('[CALL] Executing hangup successfully as requested by LLM');
+      session.ws.close();
+      return;
+    }
     
     const t3 = performance.now();
     console.log(`\n[LATENCY] Speech End -> STT Start: ${(t0 - t0).toFixed(0)}ms`); // Baseline
@@ -1004,9 +1125,15 @@ export function attachWsHandlers(ws: WebSocket, request: IncomingMessage, tenant
           case 'start': {
             const { streamSid, callSid, customParameters } = msg.start;
             const direction = customParameters?.direction || 'inbound';
+            const customerPhone = customParameters?.customerPhone || null;
             localStreamSid = streamSid;
             const session = initSession(streamSid, callSid, ws, direction as 'inbound' | 'outbound', tenantData);
-            console.log(`[SESSION] Started — callSid: ${callSid} | direction: ${direction}`);
+            
+            if (customerPhone) {
+              session.sessionState.customer.phone = customerPhone;
+            }
+            
+            console.log(`[SESSION] Started — callSid: ${callSid} | direction: ${direction} | phone: ${customerPhone}`);
 
             // FIORA speaks first — async, don't block handler
             speakFirst(session).catch((err) => {
@@ -1049,7 +1176,7 @@ export function attachWsHandlers(ws: WebSocket, request: IncomingMessage, tenant
                   console.log('[INTERRUPT] User interrupted the agent!');
                   session.playbackController.abort();
                   session.isSpeaking = false;
-                  session.audioChunks = [];
+                  // We do NOT clear session.audioChunks here, otherwise we delete the word the user just spoke!
                 }
               }
               session.vad.isSpeaking = true;
@@ -1088,6 +1215,24 @@ export function attachWsHandlers(ws: WebSocket, request: IncomingMessage, tenant
       if (localStreamSid) {
         const session = sessions.get(localStreamSid);
         if (session) {
+          // AUTO-SAVE LEAD ON HANGUP FOR OUTBOUND
+          if (session.direction === 'outbound' && session.activePersona === 'HULK' && !session.sessionState.marketing.leadSaved) {
+             console.log('[AUTO-SAVE] Call dropped. Automatically saving lead data...');
+             try {
+               await prisma.lead.create({
+                  data: {
+                     tenant_id: (session.tenantId === 'SYSTEM' || !session.tenantId) ? ((await prisma.tenant.findFirst())?.id || 'SYSTEM') : session.tenantId,
+                     name: session.sessionState.customer.name || 'Unknown',
+                     phone_number: session.sessionState.customer.phone || 'Unknown',
+                     source: 'Marketing Outbound',
+                     status: session.sessionState.marketing.interested ? 'INTERESTED' : (session.sessionState.marketing.interested === false ? 'NOT_INTERESTED' : 'NEW'),
+                     notes: 'Auto-saved on call disconnect.'
+                  }
+               });
+               session.sessionState.marketing.leadSaved = true;
+               console.log('[AUTO-SAVE] Successfully saved lead to DB');
+             } catch(e) { console.error('[DB] Auto-save failed:', e); }
+          }
           await persistTranscript(session);
           sessions.delete(localStreamSid);
         }
@@ -1110,9 +1255,8 @@ const start = async () => {
     server.server.on('upgrade', (request: IncomingMessage, socket, head) => {
       const urlObj = new URL(request.url || '', `http://${request.headers.host}`);
       
-      console.log(`[WS] Upgrade URL: ${request.url}`);
-      
-      if (urlObj.pathname.startsWith('/media-stream/')) {
+      console.log(`[WS] Upgrade URL: ${urlObj.pathname}`);
+      if (urlObj.pathname.includes('/media-stream/')) {
         const token = urlObj.pathname.split('/media-stream/')[1];
         console.log(`[WS] Token: ${token}`);
         

@@ -13,6 +13,9 @@ export class FinanceAgent {
   public name = 'finance-agent';
   public description = 'Operational Finance Automation Layer. Handles invoices, payment reminders, collections, and financial summaries.';
   public systemPrompt = FINANCE_AGENT_SYSTEM_PROMPT;
+  public allowedTools: string[] = [];
+  public speakingStyle = 'professional, precise';
+  public temperature = 0.2;
 
   public getTools(): FioraTool[] {
     return [

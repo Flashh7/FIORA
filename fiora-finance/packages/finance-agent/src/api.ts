@@ -4,6 +4,34 @@ import Razorpay from 'razorpay';
 export async function fetchRecentPayments(limit: number = 5) {
   let payments: any[] = [];
 
+  // Stripe
+  if (process.env.STRIPE_SECRET_KEY) {
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2022-11-15' as any });
+      const charges = await stripe.charges.list({ limit: limit || 5 });
+      payments.push(...charges.data.map((c: any) => ({
+        gateway: 'Stripe',
+        id: c.id,
+        amount: (c.amount / 100).toFixed(2),
+        currency: c.currency.toUpperCase(),
+        status: c.status,
+        date: new Date(c.created * 1000).toISOString(),
+        customer: c.receipt_email || 'Unknown'
+      })));
+    } catch (err) {
+      console.error('[Stripe] Failed to fetch payments:', err);
+    }
+  } else {
+    payments.push({
+      gateway: 'Stripe',
+      id: 'mock_ch_1',
+      amount: '150.00',
+      currency: 'USD',
+      status: 'succeeded',
+      date: new Date(Date.now() - 3600000).toISOString(),
+      customer: 'mock_us@example.com'
+    });
+  }
 
   // Razorpay
   if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
@@ -43,8 +71,34 @@ export async function fetchRecentPayments(limit: number = 5) {
 
 export async function fetchRevenueMetrics() {
   const metrics = {
+    stripe: { available: '0.00 USD', pending: '0.00 USD', error: false, mocked: false } as any,
     razorpay: { volume: '0.00 INR', mrr: '0.00 INR', error: false, mocked: false } as any
   };
+
+  // Stripe
+  if (process.env.STRIPE_SECRET_KEY) {
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersion: '2022-11-15' as any });
+      const balance = await stripe.balance.retrieve();
+      const availableUSD = balance.available.find(b => b.currency === 'usd')?.amount || 0;
+      const pendingUSD = balance.pending.find(b => b.currency === 'usd')?.amount || 0;
+      metrics.stripe = {
+        available: `$${(availableUSD / 100).toFixed(2)}`,
+        pending: `$${(pendingUSD / 100).toFixed(2)}`,
+        error: false,
+        mocked: false
+      };
+    } catch (err) {
+      metrics.stripe.error = true;
+    }
+  } else {
+    metrics.stripe = {
+      available: '$14,250.00',
+      pending: '$2,340.50',
+      error: false,
+      mocked: true
+    };
+  }
 
   // Razorpay
   if (process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET) {
@@ -70,7 +124,6 @@ export async function fetchRevenueMetrics() {
       metrics.razorpay.error = true;
     }
   } else {
-    metrics.razorpay.mocked = true;
     metrics.razorpay = {
       gross_volume: '845,000.00 INR',
       net_profit: '828,100.00 INR',

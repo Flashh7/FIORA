@@ -145,11 +145,15 @@ server.post('/outbound-twiml', async (request, reply) => {
   // INITIAL VERIFICATION STEP: Just say hello
   // Full websocket integration will replace this after first test.
   const host = request.headers.host;
+  const body = request.body as any;
+  const toNumber = body?.To || 'Unknown';
+  
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
     <Stream url="wss://${host}/api/voice/stream">
       <Parameter name="direction" value="outbound" />
+      <Parameter name="customerPhone" value="${toNumber}" />
     </Stream>
   </Connect>
 </Response>`;
