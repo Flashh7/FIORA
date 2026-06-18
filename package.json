@@ -7,17 +7,8 @@
     "node": ">=20.0.0"
   },
   "workspaces": [
-    "core/apps/*",
-    "core/packages/*",
-    "fiora-voice/apps/*",
-    "fiora-voice/services/*",
-    "fiora-voice/packages/*",
-    "fiora-finance/services/*",
-    "fiora-finance/packages/*",
-    "fiora-marketing/services/*",
-    "fiora-marketing/packages/*",
-    "fiora-sales/services/*",
-    "fiora-sales/packages/*"
+    "fiora-*/*/*",
+    "core/*/*"
   ],
   "scripts": {
     "build": "turbo run build --filter=dashboard --filter=gateway --filter=@fiora/agent-marketing --filter=@fiora/agent-voice",

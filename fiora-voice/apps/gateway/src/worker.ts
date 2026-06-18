@@ -98,7 +98,7 @@ export const provisioningWorker = new Worker('provision-tenant', async (job: Job
     
     throw new Error(`Twilio Provisioning Failed: ${apiErr.message}`);
   }
-}, { connection: { host: 'localhost', port: 6380 } });
+}, { connection: { host: 'localhost', port: 6379 } });
 
 provisioningWorker.on('completed', job => {
   console.log(`Job with id ${job.id} has been completed`);

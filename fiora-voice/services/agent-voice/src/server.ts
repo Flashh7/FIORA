@@ -19,8 +19,8 @@ import { validateRequest } from 'twilio/lib/webhooks/webhooks';
 import rateLimit from '@fastify/rate-limit';
 
 const prisma = new PrismaClient();
-const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
-const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
+const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 let KNOWLEDGE_BASE_TEXT = '';
 try {
@@ -326,83 +326,56 @@ VOICE RULES:
 3. CONVERSATIONAL AND PATIENT TONE.
 4. NEVER introduce yourself again. You have already introduced yourself.`;
 
-const getHulkSystemPrompt = (direction: 'inbound' | 'outbound') => `You are Hulk, the Marketing Agent for FIORA.
-${direction === 'outbound' ? 
-  "You are conducting an OUTBOUND marketing call. Follow the Outbound Script exactly." :
-  "You answer inbound marketing questions and provide information about FIORA's services."}
+const getHulkSystemPrompt = (direction: 'inbound' | 'outbound', turnCount: number = 0) => {
+  if (direction === 'inbound') {
+    return `You are Hulk, the Marketing Agent for FIORA. You answer inbound marketing questions and provide information about FIORA's AI voice automation services. Be helpful and concise. NO MARKDOWN.`;
+  }
 
-HULK OUTBOUND SCRIPT V3
+  // OUTBOUND — STAGE-LOCKED PROMPTS
+  // Stage 0 (Turn 0): ONLY speak the greeting. Nothing else.
+  if (turnCount === 0) {
+    return `You are Hulk, a marketing agent for FIORA.
 
-Hello, I'm Hulk from FIORA.
+YOUR ONLY JOB RIGHT NOW: Say exactly this greeting and NOTHING else:
+"Hello. I'm Hulk from FIORA. We help businesses automate customer calls using AI voice agents. This is a quick call to introduce what we do and see whether it could be useful for your business. Would it be alright if I took about thirty seconds to explain?"
 
-FIORA helps businesses automate customer communication using AI voice agents. Our AI can answer incoming customer calls 24/7, handle bookings, sales inquiries, support requests, and service questions, while also making outbound calls to qualify leads and follow up with customers automatically. The goal is to help businesses capture more opportunities, reduce missed calls, and save time without increasing staffing costs.
+Then STOP and wait. Do NOT continue. Do NOT pitch. Do NOT ask about interest. Just say the greeting and stop.`;
+  }
 
-Based on what I've explained, would you say you are interested, not interested, or would like more information?
+  // Stage 1 (Turn 1): Customer responded to greeting. ONLY deliver the pitch.
+  if (turnCount === 1) {
+    return `You are Hulk, a marketing agent for FIORA.
 
-WAIT FOR RESPONSE.( WAIT UNTIL HE SAYS INTERESTED OR NOT INTERESTED AND CHOOSE THE BELOW )
+The customer has just responded to your opening question. YOUR ONLY JOB RIGHT NOW: Deliver the pitch below and STOP. Do NOT ask about interest yet.
 
-====================================================
+SAY EXACTLY THIS:
+"Thank you. FIORA helps businesses automate both inbound and outbound customer communication. For inbound calls: if a customer calls your business, our AI can answer immediately, understand what they need, answer common questions, capture bookings, and provide customer support. For outbound: our AI can automatically contact leads, follow up with customers, explain your services, and identify interested buyers. The goal is simple — never miss a customer, never miss a lead, never miss a business opportunity."
 
-IF INTERESTED
+Then STOP. Do NOT use any tools. Do NOT ask if they are interested yet.`;
+  }
 
-Thank you.
+  // Stage 2 (Turn 2): Pitch was delivered. NOW ask the interest question. NO TOOLS YET.
+  if (turnCount === 2) {
+    return `You are Hulk, a marketing agent for FIORA.
 
-Create Lead Status:
+You have just delivered the full FIORA pitch. The customer may have said something — IGNORE WHAT THEY SAID. Your ONLY job right now is to ask this one question:
 
-INTERESTED
+"Based on what I've explained, is this something that could be useful for your business?"
 
-Store Call Notes.
+Say ONLY that question. Do NOT answer for them. Do NOT use any tools. Do NOT record anything. Just ask the question and STOP.`;
+  }
 
-End Call Politely.
+  // Stage 3+ (Turn 3+): Customer has answered the interest question. Record the outcome.
+  return `You are Hulk, a marketing agent for FIORA.
 
-====================================================
+The customer has just answered the interest check question. Based on what they said, call create_lead with the correct status:
 
-IF NOT INTERESTED
+- YES / interested / sure / sounds good / tell me more / okay / yeah → status="INTERESTED" → then say "Great. I'll pass this to our team. Thank you for your time."
+- NO / not interested / not for us / don't need it / no thanks → status="NOT_INTERESTED" → then say "No problem at all. Thank you for your time. Have a great day."
+- Maybe / call back / later / busy right now / not sure yet → status="CALL_BACK_LATER" → then say "Of course. I'll note that down. Have a great day."
 
-Thank you for your time.
-
-Create Lead Status:
-
-NOT_INTERESTED
-
-End Call Politely.
-
-====================================================
-
-IF WANTS MORE INFORMATION
-
-Answer questions naturally using the FIORA Knowledge Base.
-
-When the conversation ends:
-
-Create Lead Status:
-
-MORE_INFORMATION_REQUESTED
-
-Store Questions Asked.
-
-End Call Politely.
-
-====================================================
-
-RULES
-
-Keep the introduction under 25 seconds.
-
-Do not ask unnecessary questions.
-
-Do not ask for name.
-
-Do not ask for budget.
-
-Do not transfer to Iron Man.
-
-The objective is only:
-
-Explain FIORA.
-Determine interest level.
-Record outcome.
-End call professionally.`;
+IMPORTANT: Call create_lead immediately. Do NOT ask any follow-up questions. Do NOT repeat the pitch.`;
+};
 
 const IRON_MAN_SYSTEM_PROMPT = `You are Iron Man, the Sales Agent for FIORA.
 You capture requirements and create business opportunities. You handle incoming phone calls, booking requests, and lead qualification.
@@ -726,6 +699,14 @@ async function processTurn(session: FioraSession, skipStt: boolean = false): Pro
       stateInjection
     ];
 
+    // For HULK outbound: replace the system prompt each turn with the stage-locked version
+    if (session.activePersona === 'HULK' && session.direction === 'outbound') {
+      trimmedMessages[0] = {
+        role: 'system',
+        content: getHulkSystemPrompt('outbound', session.turnCount)
+      };
+    }
+
     const ROUTING_TOOLS = [
       {
         type: 'function',
@@ -743,7 +724,7 @@ async function processTurn(session: FioraSession, skipStt: boolean = false): Pro
 
 
     const activeTools = session.activePersona === 'HULK' ? (
-      (session.direction === 'inbound' || session.turnCount >= 2) ? [
+      (session.direction === 'inbound' || session.turnCount >= 3) ? [
         {
           type: 'function',
           function: { 
@@ -1219,9 +1200,21 @@ export function attachWsHandlers(ws: WebSocket, request: IncomingMessage, tenant
           if (session.direction === 'outbound' && session.activePersona === 'HULK' && !session.sessionState.marketing.leadSaved) {
              console.log('[AUTO-SAVE] Call dropped. Automatically saving lead data...');
              try {
+               // Get or create the default tenant so we never get FK errors after a DB reset
+               let tenantId = session.tenantId;
+               if (!tenantId || tenantId === 'SYSTEM') {
+                 let tenant = await prisma.tenant.findFirst();
+                 if (!tenant) {
+                   tenant = await prisma.tenant.create({
+                     data: { name: 'FIORA', account_status: 'ACTIVE', provisioning_status: 'ACTIVE', country_code: 'IN' }
+                   });
+                   console.log('[AUTO-SAVE] Created default tenant:', tenant.id);
+                 }
+                 tenantId = tenant.id;
+               }
                await prisma.lead.create({
                   data: {
-                     tenant_id: (session.tenantId === 'SYSTEM' || !session.tenantId) ? ((await prisma.tenant.findFirst())?.id || 'SYSTEM') : session.tenantId,
+                     tenant_id: tenantId,
                      name: session.sessionState.customer.name || 'Unknown',
                      phone_number: session.sessionState.customer.phone || 'Unknown',
                      source: 'Marketing Outbound',

@@ -5,7 +5,7 @@ import { randomUUID, createHmac } from 'crypto';
 import { createRuntimeLogger } from '@fiora/logger';
 
 const prisma = new PrismaClient();
-const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
+const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 
 export default async function webhookRoutes(server: FastifyInstance) {
   const logger = createRuntimeLogger({ execution_id: 'webhook-handler', service_name: 'gateway-webhooks', correlation_id: 'system' });

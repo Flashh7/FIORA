@@ -20,8 +20,8 @@ import { knowledgeRoutes } from './knowledge';
 const prisma = new PrismaClient();
 
 
-const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
-const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6380');
+const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
+const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
 redisSub.setMaxListeners(0); // Allow infinite SSE connections without EventEmiiter warnings
 
 const server = Fastify({

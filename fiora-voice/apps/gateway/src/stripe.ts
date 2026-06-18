@@ -7,7 +7,7 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_FILL_ME_IN',
   apiVersion: '2024-04-10', // updated valid API version
 });
 const prisma = new PrismaClient();
-export const provisioningQueue = new Queue('provision-tenant', { connection: { host: 'localhost', port: 6380 } });
+export const provisioningQueue = new Queue('provision-tenant', { connection: { host: 'localhost', port: 6379 } });
 
 export async function stripeWebhookRoutes(server: FastifyInstance) {
   server.post('/api/webhooks/stripe', { config: { rawBody: true } }, async (request: any, reply: FastifyReply) => {
