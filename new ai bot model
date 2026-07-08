@@ -1,0 +1,97 @@
+pip install openai speechRecognition pyaudio pygame
+
+import speech_recognition as sr
+from openai import OpenAI
+import pygame
+import os
+import time
+
+# Initialize OpenAI Client (Ensure your API key is set in your environment variables)
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# Initialize Pygame for audio playback
+pygame.mixer.init()
+
+# System prompt to ensure conversational depth and a helpful persona
+SYSTEM_PROMPT = {
+    "role": "system", 
+    "content": "You are a highly capable, human-friendly AI assistant. Keep responses concise, natural, and conversational."
+}
+chat_history = [SYSTEM_PROMPT]
+
+def listen_to_audio():
+    """Listens to the microphone and returns the audio data."""
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("\nListening...")
+        # Adjust for ambient noise for faster, cleaner capture
+        recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        audio = recognizer.listen(source)
+    return audio
+
+def transcribe_audio(audio):
+    """Uses OpenAI's Whisper model (STT) for fast, accurate transcription."""
+    print("Transcribing...")
+    with open("temp_audio.wav", "wb") as f:
+        f.write(audio.get_wav_data())
+    
+    with open("temp_audio.wav", "rb") as audio_file:
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=audio_file
+        )
+    return transcription.text
+
+def get_llm_response(user_text):
+    """Processes the text through the core AI model."""
+    print("Thinking...")
+    chat_history.append({"role": "user", "content": user_text})
+    
+    response = client.chat.completions.create(
+        model="gpt-4o", # Using a fast, highly capable model
+        messages=chat_history
+    )
+    
+    assistant_reply = response.choices[0].message.content
+    chat_history.append({"role": "assistant", "content": assistant_reply})
+    return assistant_reply
+
+def speak_text(text):
+    """Uses OpenAI's TTS engine for natural, human-like voice responses."""
+    print(f"Assistant: {text}")
+    response = client.audio.speech.create(
+        model="tts-1",
+        voice="onyx", # Deep, clear, and highly natural voice
+        input=text
+    )
+    
+    response.stream_to_file("response.mp3")
+    
+    # Play the audio
+    pygame.mixer.music.load("response.mp3")
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        time.sleep(0.1)
+
+def run_assistant():
+    """Main loop integrating the flowchart's Core AI Engine."""
+    print("Voice Assistant Initialized. Say 'terminate' to exit.")
+    try:
+        while True:
+            audio = listen_to_audio()
+            user_text = transcribe_audio(audio)
+            print(f"You said: {user_text}")
+            
+            if "terminate" in user_text.lower():
+                print("Shutting down core engine...")
+                break
+                
+            if user_text.strip():
+                reply = get_llm_response(user_text)
+                speak_text(reply)
+                
+    except KeyboardInterrupt:
+        print("\nForce quitting...")
+
+if __name__ == "__main__":
+    run_assistant()
