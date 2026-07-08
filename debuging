@@ -1,0 +1,57 @@
+// router.ts — fixed version
+
+/**
+ * Finance intent keywords. Multi-word phrases are checked as phrases;
+ * single words are checked with strict word boundaries so "late" doesn't
+ * match inside "relate", "escalate", "collateral", etc.
+ */
+const financeKeywords = [
+  'invoice', 'invoices', 'bill', 'billing',
+  'payment', 'payments', 'reminder', 'reminders',
+  'collection', 'collections', 'overdue',
+  'cashflow', 'revenue', 'expense', 'expenses'
+];
+
+// Words that need extra context because they're common outside finance too.
+const ambiguousKeywords = ['late', 'summary'];
+
+function containsWholeWord(text: string, word: string): boolean {
+  // \b = word boundary. Escapes not needed here since our keyword list has no regex specials.
+  const pattern = new RegExp(`\\b${word}\\b`, 'i');
+  return pattern.test(text);
+}
+
+/**
+ * Returns a confidence score (0-1) instead of a hard boolean so the
+ * orchestrator can compare this against other agents' scores and decide
+ * whether a topic switch is actually warranted.
+ */
+export function scoreFinanceIntent(intent: string): number {
+  const text = intent.toLowerCase();
+  let hits = 0;
+
+  for (const keyword of financeKeywords) {
+    if (containsWholeWord(text, keyword)) hits++;
+  }
+
+  // Ambiguous words only count if paired with a clearer financial signal
+  // e.g. "late payment" should count, bare "I'll be a little late" should not.
+  for (const keyword of ambiguousKeywords) {
+    if (containsWholeWord(text, keyword)) {
+      const hasFinanceContext = financeKeywords.some(k => containsWholeWord(text, k));
+      if (hasFinanceContext) hits += 0.5;
+    }
+  }
+
+  if (hits === 0) return 0;
+  // Simple normalization; tune the divisor based on real call transcripts.
+  return Math.min(1, hits / 2);
+}
+
+/**
+ * Backward-compatible boolean wrapper. Prefer scoreFinanceIntent()
+ * in the orchestrator so routing can be made "sticky" (see note below).
+ */
+export function routeToFinanceAgent(intent: string): boolean {
+  return scoreFinanceIntent(intent) >= 0.5;
+}
