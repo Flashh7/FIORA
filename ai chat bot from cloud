@@ -1,0 +1,201 @@
+"""
+Business Voice AI Assistant
+----------------------------
+Pipeline: Mic -> Whisper (STT) -> GPT-4o (LLM) -> OpenAI TTS -> Speaker
+
+Improvements over the original prototype:
+  - try/except around every network call (no crash on dropped connection)
+  - listen() timeouts so it never hangs on silence
+  - logging instead of print (for monitoring in production)
+  - temp file cleanup
+  - configurable system prompt (put your business FAQs/policies here)
+  - graceful retry on transient API errors
+"""
+
+import speech_recognition as sr
+from openai import OpenAI, APIError, APIConnectionError, RateLimitError
+import pygame
+import os
+import time
+import logging
+import tempfile
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("voice_assistant")
+
+MAX_RETRIES = 2
+LISTEN_TIMEOUT = 8          # seconds to wait for speech to START
+PHRASE_TIME_LIMIT = 15      # max seconds for a single phrase
+EXIT_PHRASES = {"terminate", "goodbye", "stop assistant"}
+
+# Put your business context here: hours, policies, FAQs, tone, escalation rules.
+SYSTEM_PROMPT = {
+    "role": "system",
+    "content": (
+        "You are a helpful, professional voice assistant for [Business Name]. "
+        "Keep answers short (2-3 sentences), natural, and conversational since "
+        "this is spoken aloud. If you don't know something specific to the "
+        "business, say you'll connect them with a human instead of guessing."
+    )
+}
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+if not os.environ.get("OPENAI_API_KEY"):
+    logger.error("OPENAI_API_KEY not set. Export it before running.")
+    raise SystemExit(1)
+
+pygame.mixer.init()
+chat_history = [SYSTEM_PROMPT]
+
+
+# ---------------------------------------------------------------------------
+# Pipeline steps
+# ---------------------------------------------------------------------------
+
+def listen_to_audio():
+    """Capture audio from the mic. Returns None on timeout/silence instead of crashing."""
+    recognizer = sr.Recognizer()
+    try:
+        with sr.Microphone() as source:
+            logger.info("Listening...")
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio = recognizer.listen(
+                source,
+                timeout=LISTEN_TIMEOUT,
+                phrase_time_limit=PHRASE_TIME_LIMIT
+            )
+        return audio
+    except sr.WaitTimeoutError:
+        logger.info("No speech detected within timeout window.")
+        return None
+    except OSError as e:
+        logger.error(f"Microphone error: {e}")
+        return None
+
+
+def transcribe_audio(audio):
+    """Whisper STT with retry. Returns '' on failure so the loop can continue."""
+    if audio is None:
+        return ""
+
+    tmp_path = os.path.join(tempfile.gettempdir(), "va_temp_audio.wav")
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(audio.get_wav_data())
+
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                with open(tmp_path, "rb") as audio_file:
+                    transcription = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file
+                    )
+                return transcription.text
+            except (APIConnectionError, RateLimitError) as e:
+                logger.warning(f"Transcription retry {attempt+1}: {e}")
+                time.sleep(1.5 * (attempt + 1))
+            except APIError as e:
+                logger.error(f"Transcription failed (non-retryable): {e}")
+                return ""
+        logger.error("Transcription failed after retries.")
+        return ""
+    except Exception as e:
+        logger.error(f"Unexpected transcription error: {e}")
+        return ""
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def get_llm_response(user_text):
+    """GPT-4o call with retry. Returns a safe fallback line on failure."""
+    chat_history.append({"role": "user", "content": user_text})
+
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=chat_history,
+                timeout=20
+            )
+            reply = response.choices[0].message.content
+            chat_history.append({"role": "assistant", "content": reply})
+            return reply
+        except (APIConnectionError, RateLimitError) as e:
+            logger.warning(f"LLM retry {attempt+1}: {e}")
+            time.sleep(1.5 * (attempt + 1))
+        except APIError as e:
+            logger.error(f"LLM call failed (non-retryable): {e}")
+            break
+
+    fallback = "Sorry, I'm having trouble connecting right now. Could you repeat that?"
+    chat_history.append({"role": "assistant", "content": fallback})
+    return fallback
+
+
+def speak_text(text):
+    """OpenAI TTS + playback, with cleanup and error handling."""
+    if not text.strip():
+        return
+
+    logger.info(f"Assistant: {text}")
+    tmp_path = os.path.join(tempfile.gettempdir(), "va_response.mp3")
+    try:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=text
+        )
+        response.stream_to_file(tmp_path)
+
+        pygame.mixer.music.load(tmp_path)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            time.sleep(0.1)
+    except Exception as e:
+        logger.error(f"TTS/playback failed: {e}")
+    finally:
+        pygame.mixer.music.unload()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+def run_assistant():
+    logger.info("Voice Assistant Initialized. Say 'terminate' to exit.")
+    try:
+        while True:
+            audio = listen_to_audio()
+            user_text = transcribe_audio(audio)
+
+            if not user_text.strip():
+                continue  # nothing understood, just listen again
+
+            logger.info(f"You said: {user_text}")
+
+            if any(phrase in user_text.lower() for phrase in EXIT_PHRASES):
+                logger.info("Shutting down.")
+                speak_text("Goodbye!")
+                break
+
+            reply = get_llm_response(user_text)
+            speak_text(reply)
+
+    except KeyboardInterrupt:
+        logger.info("Force quit by user.")
+    finally:
+        pygame.mixer.quit()
+
+
+if __name__ == "__main__":
+    run_assistant()
