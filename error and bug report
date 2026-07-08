@@ -1,0 +1,282 @@
+ looked through the diff, but I can't actually diagnose the bug from what's here — the file where this bounce-back behavior almost certainly lives, fiora-voice/services/agent-voice/src/server.ts, shows as "Large diffs are not rendered by default" in your paste, so I only have file names and stats (+260/-116), not the actual code.
+From what you're describing, though, I can tell you what kind of bug this almost always is, so you know what to look for:
+What "bounces back to another topic" usually means
+If saying a word that also appears in a different topic/intent causes the agent to jump there, it's typically one of these:
+
+Keyword-based routing instead of proper intent classification — somewhere there's likely a check like if (transcript.includes("payment")) → route to finance-agent. If "payment" also appears in a sales script, any mention of it mid-conversation yanks control away, even if the user was just referencing it in passing.
+No conversation-state/context awareness in the router — the routing decision is being made fresh on every utterance instead of considering "we're already mid-conversation on topic X, so weight staying on X unless there's a strong signal to switch."
+VAD/interruption logic mis-triggering — in server.ts (voice gateway), if speech-interrupt detection is too sensitive, a stray word can be treated as a full new turn/intent rather than a continuation, causing the same "jump to a different response" effect.
+
+Given you have finance-agent, sales-agent, marketing-agent, and a voice gateway routing between them, my strong guess is #1 or #2 — an agent router matching keywords across domains without checking current conversation context.
+What I need from you to actually fix it
+Could you paste (or upload as a file) the full content of:
+
+fiora-voice/services/agent-voice/src/server.ts — this is where the diff is hidden and where the routing/response logic almost certainly lives
+Whatever file decides which agent handles an incoming utterance (could be in server.ts or a separate router/dispatcher file)
+
+Once I can see the actual routing logic, I can point to the exact lines causing the false triggers and give you a concrete fix rather than a guess.import Stripe from 'stripe';
+import Razorpay from 'razorpay';
+
+export async function fetchRecentPayments(limit: number = 5) {
+  let payments: any[] = [];
+
+  // Stripe
+  if (process.env.STRIPE_SECRET_KEY) {
+    try {
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, { apiVersionpastedimport { FioraTool } from './types';
+import { createInvoiceTool } from './tools/createInvoice';
+import { sendInvoiceTool } from './tools/sendInvoice';
+import { sendPaymentReminderTool } from './tools/sendPaymentReminder';
+import { generateDailySummaryTool } from './tools/generateDailySummary';
+import { detectLatePaymentsTool } from './tools/detectLatePayments';
+import { categorizeTransactionTool } from './tools/categorizeTransaction';
+import { getRecentPaymentsTool } from './tools/getRecentPayments';
+import { getRevenueMetricsTool } from './tools/getRevenueMetrics';
+import { FINANCE_AGENT_SYSTEM_PROMPT } from './prompts';
+export class FinanceAgent {
+  public name = 'finance-agent';
+  public description = 'Operational Finance Automation Layer. Handles invoices, payment reminders, collections, and financial summaries.';
+  public systemPrompt = FINANCE_AGENT_SYSTEM_PROMPT;
+  public allowedTools: string[] = [];
+  public speakingStyle = 'professional, precise';
+  public temperature = 0.2;
+  public getTools(): FioraTool[] {
+    return [
+      createInvoiceTool,
+      sendInvoiceTool,
+      sendPaymentReminderTool,
+      generateDailySummaryTool,
+      detectLatePaymentsTool,
+      categorizeTransactionTool,
+      getRecentPaymentsTool,
+      getRevenueMetricsTool,
+    ];
+  }
+}
+export const financeAgent = new FinanceAgent(); here is agent code export * from './agent';
+export * from './router';
+export * from './types';
+export * from './prompts';
+export * from './api';
+export * from './tools/createInvoice';
+export * from './tools/sendInvoice';
+export * from './tools/sendPaymentReminder';
+export * from './tools/generateDailySummary';
+export * from './tools/detectLatePayments';
+export * from './tools/categorizeTransaction';
+export * from './tools/getRecentPayments';
+export * from './tools/getRevenueMetrics'; export const FINANCE_AGENT_SYSTEM_PROMPT = You are FIORA, an elite Finance Operations Agent speaking over a live phone call.
+You automate invoicing, payment reminders, daily cashflow summaries, collections, and real-time payment tracking across Stripe and Razorpay.
+VOICE RULES — FOLLOW STRICTLY:
+1. MAX 2-3 SENTENCES. Never generate essays or long paragraphs.
+2. NO MARKDOWN, NO LISTS. Never use formatting, bullet points, or numbers.
+3. CONVERSATIONAL TONE. Speak professionally, calmly, and authoritatively, like an executive CFO assistant. Avoid robotic accounting jargon.
+4. NO INTERNAL REASONING. Give the answer directly, then stop.
+5. HIDE MACHINERY. NEVER mention tools, functions, APIs, backend systems, databases, internal code, technical operations, JSON, schemas, prompts, or internal reasoning.
+6. DO NOT NARRATE OPERATIONS. BAD: "I used the invoice generation tool." GOOD: "I've generated the invoice successfully and sent it to the customer."
+7. TOOL RELIABILITY. If you use a tool, confirm the action conversationally (e.g., "I've sent that payment reminder."). DO NOT use tools unless absolutely necessary to fulfill a direct request.
+8. FOCUS ON OUTCOMES. Speak only about the conversational outcomes naturally.
+IMPORTANT: You are NOT an investing agent. Do not give financial advice, stock predictions, or tax filing advice. You only handle operational finance (invoices, collections, summaries, and real-time payment/balance reporting).; import { financeAgent } from './agent';
+export function routeToFinanceAgent(intent: string): boolean {
+  const financeKeywords = [
+    'invoice', 'invoices', 'bill', 'billing', 
+    'payment', 'payments', 'reminder', 'reminders', 
+    'collection', 'collections', 'late', 'overdue',
+    'summary', 'cashflow', 'revenue', 'expense', 'expenses'
+  ];
+  const lowerIntent = intent.toLowerCase();
+  for (const keyword of financeKeywords) {
+    if (lowerIntent.includes(keyword)) {
+      return true;
+    }
+  }
+  return false;
+}
+export { financeAgent }; import { google } from 'googleapis';
+export interface LedgerRow {
+  date: string;
+  type: string;
+  category: string;
+  amount: number;
+  status: string;
+  customer?: string;
+  invoiceId?: string;
+}
+export class GoogleSheetsClient {
+  private sheets;
+  private spreadsheetId: string;
+  constructor() {
+    this.spreadsheetId = process.env.FINANCE_SHEET_ID || '';
+    // Standard Google Application Default Credentials or explicit auth
+    const auth = new google.auth.GoogleAuth({
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    this.sheets = google.sheets({ version: 'v4', auth });
+  }
+  async getLedger(): Promise<LedgerRow[]> {
+    if (!this.spreadsheetId) {
+      console.warn('[FINANCE] No FINANCE_SHEET_ID set. Returning empty ledger.');
+      return [];
+    }
+    try {
+      const response = await this.sheets.spreadsheets.values.get({
+        spreadsheetId: this.spreadsheetId,
+        range: 'Transactions!A2:G',
+      });
+      const rows = response.data.values || [];
+      return rows.map((row) => ({
+        date: row[0] || '',
+        type: row[1] || '',
+        category: row[2] || '',
+        amount: parseFloat(row[3]) || 0,
+        status: row[4] || '',
+        customer: row[5] || '',
+        invoiceId: row[6] || '',
+      }));
+    } catch (err) {
+      console.error('[FINANCE] Failed to fetch ledger from Google Sheets:', err);
+      return [];
+    }
+  }
+  async appendRow(row: any[]): Promise<boolean> {
+    if (!this.spreadsheetId) {
+      console.warn('[FINANCE] No FINANCE_SHEET_ID set. Cannot append row.');
+      return false;
+    }
+    try {
+      await this.sheets.spreadsheets.values.append({
+        spreadsheetId: this.spreadsheetId,
+        range: 'Transactions!A:G',
+        valueInputOption: 'USER_ENTERED',
+        requestBody: {
+          values: [row],
+        },
+      });
+      return true;
+    } catch (err) {
+      console.error('[FINANCE] Failed to append row to Google Sheets:', err);
+      return false;
+    }
+  }
+}
+export const sheetsClient = new GoogleSheetsClient(); import { z } from 'zod';
+export interface Invoice {
+  invoiceId: string;
+  customer: string;
+  amount: number;
+  dueDate: string;
+  status: 'PENDING' | 'PAID' | 'OVERDUE' | 'CANCELLED';
+  description?: string;
+}
+export interface DailySummary {
+  revenueToday: number;
+  pendingPayments: number;
+  lateInvoices: number;
+  largestExpense: {
+    category: string;
+    amount: number;
+  };
+}
+export interface FioraTool<T = any> {
+  name: string;
+  description: string;
+  inputSchema: z.ZodType<T>;
+  timeoutMs: number;
+  execute: (input: T) => Promise<string>;
+} {
+  "name": "@fiora/finance-agent",
+  "version": "1.0.0",
+  "description": "FIORA Finance Agent - Operational Finance Automation Layer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "googleapis": "^173.0.0",
+    "razorpay": "^2.9.6",
+    "stripe": "^22.2.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  }
+{
+  "name": "@fiora/finance-agent",
+  "version": "1.0.0",
+  "description": "FIORA Finance Agent - Operational Finance Automation Layer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "googleapis": "^173.0.0",
+    "razorpay": "^2.9.6",
+    "stripe": "^22.2.1",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "rimraf": "^5.0.5",
+    "typescript": "^5.3.3"
+  }
+} here is a total coding wich i done last week check it and solve the proble wich i mention belowShow moreDiagnosed substring matching flaws, proposed regex and LLM solutionsDiagnosed substring matching flaws, proposed regex and LLM solutionsFound it. The bug is in router.ts:
+tsexport function routeToFinanceAgent(intent: string): boolean {
+  const financeKeywords = [
+    'invoice', 'invoices', 'bill', 'billing', 
+    'payment', 'payments', 'reminder', 'reminders', 
+    'collection', 'collections', 'late', 'overdue',
+    'summary', 'cashflow', 'revenue', 'expense', 'expenses'
+  ];
+  const lowerIntent = intent.toLowerCase();
+  for (const keyword of financeKeywords) {
+    if (lowerIntent.includes(keyword)) {
+      return true;
+    }
+  }
+  return false;
+}
+The actual bug
+.includes(keyword) is a raw substring match, not a word match. That means it fires on any word that contains the keyword as a fragment, even inside a completely unrelated word. This is exactly your "bounces to another topic" symptom:
+Customer saysContains substringWrongly routes to finance"Can you relate that to last month?"late✅ triggers overdue/late"That's my collateral for the loan"late✅"We need to escalate this"late✅"Put it on the billboard"bill✅"That's a billion-dollar market"bill✅"Give me a summary of the meeting" (a generic ask, not financial)summary✅
+So the second any of these substrings shows up — regardless of context, regardless of which agent is currently active — the caller gets yanked into the finance agent talking about invoices. That's your "confuse/bounce back" bug exactly.
+There's a second, related problem: this function only checks one agent in isolation. Nothing here compares against sales/marketing keyword scores or considers who's currently speaking, so there's no way to prefer "stay on the current topic" over "jump because one word matched."
+The fix
+1. Use word-boundary matching, not substring matching:Created a file, read a fileCreated a file, read a file2. The bigger structural fix you actually need
+Word-boundary matching stops the worst false positives, but the real fix is architectural. Right now each agent (finance, sales, marketing) almost certainly has its own routeToXAgent(intent): boolean checked independently. That means:
+
+Two agents can both return true for the same sentence, and whichever gets checked first silently wins
+There's no "stickiness" — if the caller is already mid-conversation with the finance agent, a single stray word can still yank them to another agent even mid-sentence
+
+What you want in your orchestrator (likely in agent-voice/src/server.ts, which is the file I still can't see in full) is something like:
+tsconst scores = {
+  finance: scoreFinanceIntent(transcript),
+  sales: scoreSalesIntent(transcript),
+  marketing: scoreMarketingIntent(transcript),
+};
+
+const currentAgent = session.activeAgent; // whoever is currently talking
+const currentScore = scores[currentAgent] ?? 0;
+const [bestAgent, bestScore] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+
+// Require a clear margin to switch agents mid-call — this is what stops
+// single-keyword "bounce back" glitches.
+const SWITCH_THRESHOLD = 0.6;
+const SWITCH_MARGIN = 0.25;
+
+if (bestAgent !== currentAgent && bestScore >= SWITCH_THRESHOLD && (bestScore - currentScore) >= SWITCH_MARGIN) {
+  session.activeAgent = bestAgent;
+}
+This gives you two protections your current code has neither of:
+
+Comparison across agents instead of "first match wins"
+Hysteresis/stickiness — a topic switch only happens when the new agent's confidence clearly beats the current one, not on any single keyword hit
+
+What you need to do
+
+Swap router.ts for the fixed version above in each agent package (you'll need the equivalent scoreSalesIntent/scoreMarketingIntent for the other agents too — happy to write those if you share their current keyword lists).
+Find the routing/orchestration logic in agent-voice/src/server.ts — the diff showed it changed by +260/-116 lines, so this is likely where the actual dispatch decision is made. Paste its full content and I'll wire in the scoring + stickiness logic directly.
+Test with a few "trap" phrases like "let's escalate that," "put it on the billboard," "can you relate that" — these should no longer misroute after the word-boundary fix alone.
